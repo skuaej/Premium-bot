@@ -649,22 +649,17 @@ async def check_fsub(client: Client, user_id: int):
     
     missing_channels = []
     
-    async with aiohttp.ClientSession() as session:
-        for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
-            is_member = False
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember?chat_id={ch_id}&user_id={user_id}"
-            try:
-                async with session.get(url, timeout=5) as resp:
-                    data = await resp.json()
-                    if data.get("ok"):
-                        status = data["result"]["status"]
-                        if status in ["member", "administrator", "creator"]:
-                            is_member = True
-            except Exception: 
-                pass
-                
-            if not is_member:
+    for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
+        try:
+            member = await client.get_chat_member(chat_id=ch_id, user_id=user_id)
+            if member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                continue
+            else:
                 missing_channels.append((idx, ch_id))
+        except UserNotParticipant:
+            missing_channels.append((idx, ch_id))
+        except Exception:
+            missing_channels.append((idx, ch_id))
                 
     if missing_channels:
         missing_buttons = []
