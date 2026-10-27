@@ -1,4 +1,3 @@
-
 import asyncio
 import random
 import secrets
@@ -94,7 +93,9 @@ spam_notified = set()
 pending_proofs = {}
 pending_utr = {}
 
+# --- COOLDOWNS ---
 video_cooldowns = {}
+batch_cooldowns = {}
 VIDEO_COOLDOWN_SEC = 15
 
 idx_state = {
@@ -539,19 +540,44 @@ async def refer_handler(client: Client, message: Message): await send_refer_stat
 async def batch_handler(client: Client, message: Message):
     user_id = message.from_user.id
     
+    # 1. Check for 1-minute batch cooldown
+    now = time.time()
+    if user_id != OWNER_ID and user_id in batch_cooldowns:
+        passed = now - batch_cooldowns[user_id]
+        if passed < 60:
+            rem = int(60 - passed)
+            temp_msg = await message.reply(f"⏳ **Batch Cooldown!** Wait `{rem}s` before using BATCH again.")
+            asyncio.create_task(auto_delete_msg(temp_msg, 5))
+            return
+            
     all_vids = await videos_col.find().to_list(length=500)
-    if not all_vids: return await message.reply("⚠️ No videos indexed in database channel yet.")
+    if not all_vids: 
+        return await message.reply("⚠️ No videos indexed in database channel yet.")
+    
+    # Update cooldown timestamp after successful check
+    batch_cooldowns[user_id] = time.time()
     
     caption_text = "⏳ **This video will expire in 5 minutes! Save it ASAP!**"
-    for v in random.sample(all_vids, min(5, len(all_vids))):
+    
+    # 2. Limit to exactly 4 videos
+    for v in random.sample(all_vids, min(4, len(all_vids))):
         try:
-            sent = await client.copy_message(chat_id=user_id, from_chat_id=DB_CHANNEL, message_id=v["msg_id"], caption=caption_text, protect_content=False)
+            sent = await client.copy_message(
+                chat_id=user_id, 
+                from_chat_id=DB_CHANNEL, 
+                message_id=v["msg_id"], 
+                caption=caption_text, 
+                protect_content=True # Forwarding turned OFF for batch videos
+            )
             asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
-        except Exception: pass
+        except Exception: 
+            pass
 
 # ==================== GET VIDEO ====================
 async def send_video_item(client: Client, user_id: int, chat_id: int, query: CallbackQuery = None, direction="next"):
     now = time.time()
+    
+    # 1. Check 15-second cooldown
     if user_id != OWNER_ID and user_id in video_cooldowns:
         passed = now - video_cooldowns[user_id]
         if passed < VIDEO_COOLDOWN_SEC:
@@ -563,11 +589,13 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
                 asyncio.create_task(auto_delete_msg(temp_msg, 5))
                 return
 
+    # 2. Fix for Force Sub crashing - Use client.send_message
     joined, btns = await check_fsub(client, user_id)
     if not joined:
-        return await message.reply(
-            "⚠️ **Please join all our updates channels first!**\n\n"
-            "👉 *Please check if you have joined these channels one by one, then click TRY AGAIN.*", 
+        return await client.send_message(
+            chat_id=chat_id,
+            text="⚠️ **Please join all our updates channels first!**\n\n"
+                 "👉 *Please check if you have joined these channels one by one, then click TRY AGAIN.*", 
             reply_markup=InlineKeyboardMarkup(btns)
         )
 
@@ -593,7 +621,8 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
         return await client.send_message(chat_id, text, reply_markup=kb)
 
     all_vids = await videos_col.find().sort("msg_id", 1).to_list(length=10000)
-    if not all_vids: return await client.send_message(chat_id, "⚠️ **No videos found in DB!** Run `/index 1 100`.")
+    if not all_vids: 
+        return await client.send_message(chat_id, "⚠️ **No videos found in DB!** Run `/index 1 100`.")
 
     current_idx = user.get("video_index", 0)
     
@@ -620,11 +649,14 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
         caption_text = "⏳ **This video will expire in 5 minutes! Save it ASAP!**"
         sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption=caption_text, reply_markup=kb, protect_content=not prem)
         
+        # Apply the 15-second cooldown upon successful send
         video_cooldowns[user_id] = time.time()
         asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
         
-    except PeerIdInvalid: await client.send_message(chat_id, "⚠️ Bot is blind to Database Channel. Admin must send a text message in the DB channel.")
-    except Exception as e: await client.send_message(chat_id, f"⚠️ Error fetching video: `{e}`")
+    except PeerIdInvalid: 
+        await client.send_message(chat_id, "⚠️ Bot is blind to Database Channel. Admin must send a text message in the DB channel.")
+    except Exception as e: 
+        await client.send_message(chat_id, f"⚠️ Error fetching video: `{e}`")
 
 @app.on_message(filters.regex("^GET VIDEO 🍭$") & filters.private)
 async def get_video_handler(client: Client, message: Message): 
