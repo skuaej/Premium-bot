@@ -88,12 +88,14 @@ SPAM_BLOCK_DURATION = 300
 
 START_TIME = time.time()
 
-# ==================== GLOBAL HELPER FUNCTION (BULLETPROOF FIX) ====================
+# ==================== BULLETPROOF AUTO DELETE ====================
 async def auto_delete_msg(client: Client, chat_id: int, message_id: int, delay: int = AUTO_DELETE_SECONDS):
     await asyncio.sleep(delay)
-    try: await client.delete_messages(chat_id, message_id)
-    except Exception: pass
-# ====================================================================================
+    try: 
+        await client.delete_messages(chat_id=chat_id, message_ids=message_id)
+    except Exception: 
+        pass
+# =================================================================
 
 app = Client("Pookie69Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -175,6 +177,7 @@ async def get_user(user_id: int):
     return user
 
 async def is_premium(user_id: int) -> bool:
+    if user_id == OWNER_ID: return True
     user = await get_user(user_id)
     exp = user.get("premium_expiry")
     if exp and isinstance(exp, datetime):
@@ -406,31 +409,29 @@ async def find_cmd(client: Client, message: Message):
 
     user = await get_user(user_id)
     prem = await is_premium(user_id)
-    is_adm = await check_admin(user_id, "read") 
 
-    # 3. Check Limits
-    if not prem and not is_adm:
-        if user.get("daily_count", 0) >= FREE_DAILY_LIMIT:
-            bot_me = await client.get_me()
-            verify_short_url = await get_verify_link(client, user_id)
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Watch Ads (1 Day)", url=verify_short_url)],
-                [InlineKeyboardButton("🎁 Refer & Earn (1 Day)", url=f"https://t.me/share/url?url=https://t.me/{bot_me.username}?start=ref_{user_id}")],
-                [InlineKeyboardButton("💎 Buy Premium (Instant)", callback_data="force_buy_menu")]
-            ])
-            text = f"⚠️ **Yᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ᴅᴀɪʟʏ ғʀᴇᴇ ʟɪᴍɪᴛ ({FREE_DAILY_LIMIT}/{FREE_DAILY_LIMIT})...!**\n\n⏳ *Come back tomorrow for 50 new videos, or unlock unlimited access right now!*"
-            return await message.reply(text, reply_markup=kb)
+    # 3. Check Limits (Strict Free Limit Block)
+    if not prem and user.get("daily_count", 0) >= FREE_DAILY_LIMIT:
+        bot_me = await client.get_me()
+        verify_short_url = await get_verify_link(client, user_id)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Watch Ads (1 Day)", url=verify_short_url)],
+            [InlineKeyboardButton("🎁 Refer & Earn (1 Day)", url=f"https://t.me/share/url?url=https://t.me/{bot_me.username}?start=ref_{user_id}")],
+            [InlineKeyboardButton("💎 Buy Premium (Instant)", callback_data="force_buy_menu")]
+        ])
+        text = f"⚠️ **Yᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ᴅᴀɪʟʏ ғʀᴇᴇ ʟɪᴍɪᴛ ({FREE_DAILY_LIMIT}/{FREE_DAILY_LIMIT})...!**\n\n⏳ *Come back tomorrow for 50 new videos, or unlock unlimited access right now!*"
+        return await message.reply(text, reply_markup=kb)
 
     # 4. Fetch from DB
     vid = await videos_col.find_one({"msg_id": msg_id})
     if not vid: return await message.reply("❌ Video not found in the database.")
     
-    # Update state
-    if not prem and not is_adm:
+    # 5. Update State
+    if not prem:
         await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}})
     video_cooldowns[user_id] = time.time()
 
-    # 5. Send and set for auto-delete
+    # 6. Send and set for Auto-Delete
     try:
         caption_text = f"🍿 **Video ID:** `{msg_id}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
         sent = await client.copy_message(chat_id=message.chat.id, from_chat_id=DB_CHANNEL, message_id=msg_id, caption=caption_text, protect_content=True)
