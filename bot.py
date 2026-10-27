@@ -20,7 +20,7 @@ except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-from pyrogram import Client, filters, StopPropagation, idle
+from pyrogram import Client, utils, filters, StopPropagation, idle
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.types import (
     Message, CallbackQuery,
@@ -29,6 +29,19 @@ from pyrogram.types import (
 )
 from pyrogram.errors import UserNotParticipant, FloodWait, PeerIdInvalid
 from motor.motor_asyncio import AsyncIOMotorClient
+
+# ==================== PYROGRAM PEER ID BUG MONKEY PATCH ====================
+def get_peer_type_new(peer_id: int) -> str:
+    peer_id_str = str(peer_id)
+    if not peer_id_str.startswith("-"):
+        return "user"
+    elif peer_id_str.startswith("-100"):
+        return "channel"
+    else:
+        return "chat"
+
+utils.get_peer_type = get_peer_type_new
+# ============================================================================
 
 # ==================== CONFIGURATION ====================
 API_ID = int(os.environ.get("API_ID", "27479878"))
@@ -81,11 +94,9 @@ spam_notified = set()
 pending_proofs = {}
 pending_utr = {}
 
-# VIDEO COOLDOWN TRACKER (15 SECONDS)
 video_cooldowns = {}
 VIDEO_COOLDOWN_SEC = 15
 
-# Live Indexing Tracker
 idx_state = {
     "is_active": False,
     "start": 0,
@@ -104,7 +115,6 @@ PLANS = {
     "1y": {"name": "1 YEAR", "price": 480, "days": 365},
 }
 
-# ✅ ADDED SUPPORT BUTTON TO MAIN MENU
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("PLAN STATUS 🏷"), KeyboardButton("GET VIDEO 🍭")],
@@ -218,7 +228,7 @@ async def get_verify_link(client: Client, user_id: int) -> str:
 
 async def check_fsub(client: Client, user_id: int):
     if user_id == OWNER_ID: return True, []
-    missing_buttons = []
+    is_missing = False
     
     async with aiohttp.ClientSession() as session:
         for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
@@ -231,16 +241,21 @@ async def check_fsub(client: Client, user_id: int):
                         status = data["result"]["status"]
                         if status in ["member", "administrator", "creator"]:
                             is_member = True
-            except Exception as e:
+            except Exception:
                 pass
                 
             if not is_member:
-                link = FSUB_LINKS.get(ch_id, "https://t.me/telegram")
-                missing_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
+                is_missing = True
+                break
                 
-    if missing_buttons:
-        missing_buttons.append([InlineKeyboardButton("🔄 TRY AGAIN", callback_data="check_fsub")])
-        return False, missing_buttons
+    if is_missing:
+        all_buttons = []
+        for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
+            link = FSUB_LINKS.get(ch_id, "https://t.me/telegram")
+            all_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
+        all_buttons.append([InlineKeyboardButton("🔄 TRY AGAIN", callback_data="check_fsub")])
+        return False, all_buttons
+        
     return True, []
 
 async def auto_delete_msg(msg: Message, delay: int = AUTO_DELETE_SECONDS):
@@ -410,18 +425,24 @@ async def start_cmd(client: Client, message: Message):
         except Exception: pass
 
     joined, btns = await check_fsub(client, user_id)
-    if not joined: return await message.reply("⚠️ **Please join all our updates channels below to use this bot!**", reply_markup=InlineKeyboardMarkup(btns))
+    if not joined:
+        return await message.reply(
+            "⚠️ **Please join all our updates channels below to use this bot!**\n\n"
+            "👉 *Please check if you have joined these channels one by one, then click TRY AGAIN.*", 
+            reply_markup=InlineKeyboardMarkup(btns)
+        )
     await message.reply(f"👋 **Welcome {message.from_user.first_name}!**\n\nUse the buttons below to get videos or manage your plan.", reply_markup=MAIN_KEYBOARD)
 
 @app.on_callback_query(filters.regex("^check_fsub$"))
 async def fsub_callback(client: Client, query: CallbackQuery):
     joined, btns = await check_fsub(client, query.from_user.id)
-    if not joined: return await query.answer("❌ You haven't joined all channels yet!", show_alert=True)
+    if not joined: 
+        return await query.answer("❌ You haven't joined all channels yet! Please check them one by one.", show_alert=True)
     await query.message.delete()
     await query.message.reply("✅ **Thank you for joining!** Use the menu below:", reply_markup=MAIN_KEYBOARD)
 
 # ==================== PLAN STATUS ====================
-async def send_plan_menu(message: Message, user_id: int, force_buy=False):
+async def send_plan_menu(message: Message, user_id: int, force_buy=False, is_cb=False):
     user = await get_user(user_id)
     prem = await is_premium(user_id)
     
@@ -447,13 +468,17 @@ async def send_plan_menu(message: Message, user_id: int, force_buy=False):
             [InlineKeyboardButton("💳 Extend Premium", callback_data="force_buy_menu")],
             [InlineKeyboardButton("👨‍💻 Contact Support", url=f"https://t.me/{ADMIN_SUPPORT.replace('@', '')}")]
         ])
+        if is_cb:
+            try: return await message.edit_text(text, reply_markup=kb)
+            except Exception: pass
         return await message.reply(text, reply_markup=kb)
         
-    daily_count = user.get("daily_count", 0)
+    limit_disp = "♾️ UNLIMITED (Premium)" if prem else f"{user.get('daily_count', 0)} / {FREE_DAILY_LIMIT}"
+    
     text = (
         "💳 **CHOOSE A PLAN**\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 **Free Limit Used:** `{daily_count} / {FREE_DAILY_LIMIT}`\n"
+        f"📊 **Limit:** `{limit_disp}`\n"
         "🏦 PAYTM • UPI • PHONEPE • GPAY\n\n"
         "✦ Pʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴀᴛᴇs ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʏ ᴀғᴛᴇʀ ᴘᴀʏᴍᴇɴᴛ\n"
         "✦ Fᴏʀᴡᴀʀᴅ & Dᴏᴡɴʟᴏᴀᴅ ᴇɴᴀʙʟᴇᴅ ✅\n"
@@ -465,6 +490,10 @@ async def send_plan_menu(message: Message, user_id: int, force_buy=False):
         [InlineKeyboardButton("1 MONTH · ₹60", callback_data="buy_1m"), InlineKeyboardButton("3 MONTHS · ₹150", callback_data="buy_3m")],
         [InlineKeyboardButton("6 MONTHS · ₹270", callback_data="buy_6m"), InlineKeyboardButton("1 YEAR · ₹480", callback_data="buy_1y")]
     ])
+    
+    if is_cb:
+        try: return await message.edit_text(text, reply_markup=kb)
+        except Exception: pass
     await message.reply(text, reply_markup=kb)
 
 @app.on_message(filters.regex("^(PLAN STATUS 🏷|BUY PREMIUM)$") & filters.private)
@@ -476,7 +505,7 @@ async def plan_status_handler(client: Client, message: Message):
 async def open_premium_cb(client: Client, query: CallbackQuery):
     await query.answer()
     force = query.data == "force_buy_menu"
-    await send_plan_menu(query.message, query.from_user.id, force_buy=force)
+    await send_plan_menu(query.message, query.from_user.id, force_buy=force, is_cb=True)
 
 # ==================== SUPPORT BUTTON ====================
 @app.on_message(filters.regex("^SUPPORT 👨‍💻$") & filters.private)
@@ -520,7 +549,7 @@ async def batch_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
         except Exception: pass
 
-# ==================== GET VIDEO (WITH 15 SEC COOLDOWN) ====================
+# ==================== GET VIDEO ====================
 async def send_video_item(client: Client, user_id: int, chat_id: int, query: CallbackQuery = None, direction="next"):
     now = time.time()
     if user_id != OWNER_ID and user_id in video_cooldowns:
@@ -536,7 +565,11 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
 
     joined, btns = await check_fsub(client, user_id)
     if not joined:
-        return await client.send_message(chat_id, "⚠️ **Please join all our updates channels first!**", reply_markup=InlineKeyboardMarkup(btns))
+        return await message.reply(
+            "⚠️ **Please join all our updates channels first!**\n\n"
+            "👉 *Please check if you have joined these channels one by one, then click TRY AGAIN.*", 
+            reply_markup=InlineKeyboardMarkup(btns)
+        )
 
     user = await get_user(user_id)
     prem = await is_premium(user_id)
