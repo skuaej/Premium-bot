@@ -88,12 +88,12 @@ SPAM_BLOCK_DURATION = 300
 
 START_TIME = time.time()
 
-# ==================== GLOBAL HELPER FUNCTION ====================
-async def auto_delete_msg(msg: Message, delay: int = AUTO_DELETE_SECONDS):
+# ==================== GLOBAL HELPER FUNCTION (BULLETPROOF FIX) ====================
+async def auto_delete_msg(client: Client, chat_id: int, message_id: int, delay: int = AUTO_DELETE_SECONDS):
     await asyncio.sleep(delay)
-    try: await msg.delete()
+    try: await client.delete_messages(chat_id, message_id)
     except Exception: pass
-# ================================================================
+# ====================================================================================
 
 app = Client("Pookie69Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -383,11 +383,23 @@ async def find_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     if len(message.command) < 2: 
         return await message.reply("Usage: `/find <video_id>`\n*(Example: `/find 152`)*")
+    
     try: 
         msg_id = int(message.command[1])
     except ValueError: 
         return await message.reply("❌ Invalid ID. Must be a number.")
 
+    # 1. Check Cooldown
+    now = time.time()
+    if user_id != OWNER_ID and user_id in video_cooldowns:
+        passed = now - video_cooldowns[user_id]
+        if passed < VIDEO_COOLDOWN_SEC:
+            rem = int(VIDEO_COOLDOWN_SEC - passed)
+            temp_msg = await message.reply(f"⏳ **Cool down!** Wait `{rem}s` before searching again.")
+            asyncio.create_task(auto_delete_msg(client, message.chat.id, temp_msg.id, 5))
+            return
+
+    # 2. Check Force Sub
     joined, btns = await check_fsub(client, user_id)
     if not joined:
         return await message.reply("⚠️ **Please join all our channels first!**", reply_markup=InlineKeyboardMarkup(btns))
@@ -396,6 +408,7 @@ async def find_cmd(client: Client, message: Message):
     prem = await is_premium(user_id)
     is_adm = await check_admin(user_id, "read") 
 
+    # 3. Check Limits
     if not prem and not is_adm:
         if user.get("daily_count", 0) >= FREE_DAILY_LIMIT:
             bot_me = await client.get_me()
@@ -408,16 +421,20 @@ async def find_cmd(client: Client, message: Message):
             text = f"⚠️ **Yᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ᴅᴀɪʟʏ ғʀᴇᴇ ʟɪᴍɪᴛ ({FREE_DAILY_LIMIT}/{FREE_DAILY_LIMIT})...!**\n\n⏳ *Come back tomorrow for 50 new videos, or unlock unlimited access right now!*"
             return await message.reply(text, reply_markup=kb)
 
+    # 4. Fetch from DB
     vid = await videos_col.find_one({"msg_id": msg_id})
     if not vid: return await message.reply("❌ Video not found in the database.")
     
+    # Update state
     if not prem and not is_adm:
         await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}})
+    video_cooldowns[user_id] = time.time()
 
+    # 5. Send and set for auto-delete
     try:
         caption_text = f"🍿 **Video ID:** `{msg_id}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
         sent = await client.copy_message(chat_id=message.chat.id, from_chat_id=DB_CHANNEL, message_id=msg_id, caption=caption_text, protect_content=True)
-        asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
+        asyncio.create_task(auto_delete_msg(client, message.chat.id, sent.id, AUTO_DELETE_SECONDS))
     except Exception as e:
         await message.reply(f"⚠️ Error sending video: {e}")
 
@@ -783,7 +800,7 @@ async def batch_handler(client: Client, message: Message):
         if passed < 60:
             rem = int(60 - passed)
             temp_msg = await message.reply(f"⏳ **Batch Cooldown!** Wait `{rem}s`.")
-            asyncio.create_task(auto_delete_msg(temp_msg, 5))
+            asyncio.create_task(auto_delete_msg(client, message.chat.id, temp_msg.id, 5))
             return
             
     all_vids = await videos_col.find().to_list(length=500)
@@ -794,7 +811,7 @@ async def batch_handler(client: Client, message: Message):
         try:
             caption_text = f"🍿 **Video ID:** `{v['msg_id']}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
             sent = await client.copy_message(chat_id=user_id, from_chat_id=DB_CHANNEL, message_id=v["msg_id"], caption=caption_text, protect_content=True)
-            asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
+            asyncio.create_task(auto_delete_msg(client, user_id, sent.id, AUTO_DELETE_SECONDS))
         except: pass
 
 async def send_video_item(client: Client, user_id: int, chat_id: int, query: CallbackQuery = None, direction="next"):
@@ -806,7 +823,7 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
             if query: return await query.answer(f"⏳ Cool down! Wait {rem}s.", show_alert=True)
             else:
                 temp_msg = await client.send_message(chat_id, f"⏳ **Cool down!** Wait `{rem}s`.")
-                asyncio.create_task(auto_delete_msg(temp_msg, 5))
+                asyncio.create_task(auto_delete_msg(client, chat_id, temp_msg.id, 5))
                 return
 
     joined, btns = await check_fsub(client, user_id)
@@ -852,7 +869,7 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
         caption_text = f"🍿 **Video ID:** `{chosen['msg_id']}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
         sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption=caption_text, reply_markup=kb, protect_content=True)
         video_cooldowns[user_id] = time.time()
-        asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
+        asyncio.create_task(auto_delete_msg(client, chat_id, sent.id, AUTO_DELETE_SECONDS))
     except PeerIdInvalid: await client.send_message(chat_id, "⚠️ Bot is blind to Database Channel. Send a text message inside DB.")
     except Exception as e: await client.send_message(chat_id, f"⚠️ Error fetching video: `{e}`")
 
