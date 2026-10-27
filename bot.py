@@ -30,7 +30,7 @@ from pyrogram.types import (
 from pyrogram.errors import UserNotParticipant, FloodWait, PeerIdInvalid
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# ==================== CONFIGURATION (CLOUD READY) ====================
+# ==================== CONFIGURATION ====================
 API_ID = int(os.environ.get("API_ID", "27479878"))
 API_HASH = os.environ.get("API_HASH", "05f8dc8265d4c5df6376dded1d71c0ff")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8898529611:AAFG-W2NG8rOMVfwyTRLcCYGbizDf5nCfDU")
@@ -81,6 +81,20 @@ spam_notified = set()
 pending_proofs = {}
 pending_utr = {}
 
+# VIDEO COOLDOWN TRACKER (15 SECONDS)
+video_cooldowns = {}
+VIDEO_COOLDOWN_SEC = 15
+
+# Live Indexing Tracker
+idx_state = {
+    "is_active": False,
+    "start": 0,
+    "end": 0,
+    "current": 0,
+    "added": 0,
+    "skipped": 0
+}
+
 PLANS = {
     "1d": {"name": "1 DAY", "price": 9, "days": 1},
     "7d": {"name": "7 DAYS", "price": 24, "days": 7},
@@ -90,11 +104,12 @@ PLANS = {
     "1y": {"name": "1 YEAR", "price": 480, "days": 365},
 }
 
+# ✅ ADDED SUPPORT BUTTON TO MAIN MENU
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("PLAN STATUS 🏷"), KeyboardButton("GET VIDEO 🍭")],
         [KeyboardButton("REFER 👥"), KeyboardButton("BUY PREMIUM")],
-        [KeyboardButton("BATCH 💋")]
+        [KeyboardButton("BATCH 💋"), KeyboardButton("SUPPORT 👨‍💻")]
     ],
     resize_keyboard=True
 )
@@ -201,12 +216,10 @@ async def get_verify_link(client: Client, user_id: int) -> str:
     except Exception: pass
     return FALLBACK_SHORT_LINK
 
-# ==================== STRICT FORCE SUBSCRIBE (HTTP API BYPASS) ====================
 async def check_fsub(client: Client, user_id: int):
     if user_id == OWNER_ID: return True, []
     missing_buttons = []
     
-    # Using Raw Telegram API to completely bypass Pyrogram's PeerIdInvalid cache issues
     async with aiohttp.ClientSession() as session:
         for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
             is_member = False
@@ -219,7 +232,7 @@ async def check_fsub(client: Client, user_id: int):
                         if status in ["member", "administrator", "creator"]:
                             is_member = True
             except Exception as e:
-                print(f"⚠️ API Fetch Error for Channel {idx}: {e}")
+                pass
                 
             if not is_member:
                 link = FSUB_LINKS.get(ch_id, "https://t.me/telegram")
@@ -290,8 +303,31 @@ async def unblock_cmd(client: Client, message: Message):
     spam_notified.discard(uid)
     await message.reply(f"✅ User `{uid}` unblocked from spam cooldown!")
 
+@app.on_message(filters.command("progress") & filters.user(OWNER_ID))
+async def progress_cmd(client: Client, message: Message):
+    if not idx_state["is_active"]:
+        return await message.reply("💤 No indexing is currently running.")
+        
+    total = idx_state["end"] - idx_state["start"] + 1
+    checked = idx_state["current"] - idx_state["start"]
+    percent = (checked / total) * 100 if total > 0 else 0
+    
+    text = (
+        "🔄 **INDEXING IN PROGRESS...**\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📊 **Checked:** `{checked} / {total}` ({percent:.1f}%)\n"
+        f"🆕 **Added:** `{idx_state['added']}`\n"
+        f"⏭️ **Skipped:** `{idx_state['skipped']}`\n"
+        f"📍 **Current ID Scan:** `{idx_state['current']}`\n"
+        "━━━━━━━━━━━━━━━━━━"
+    )
+    await message.reply(text)
+
 @app.on_message(filters.command("index") & filters.user(OWNER_ID))
 async def manual_index(client: Client, message: Message):
+    if idx_state["is_active"]:
+        return await message.reply("⚠️ **Indexing is already running!** Use `/progress` to check the status.")
+        
     if len(message.command) == 2:
         start_id = 1
         try: end_id = int(message.command[1])
@@ -304,26 +340,38 @@ async def manual_index(client: Client, message: Message):
     else: return await message.reply("**Usage:**\n`/index <last_msg_id>`\n`/index <start_id> <end_id>`")
     
     if start_id > end_id: return await message.reply("❌ Start ID must be less than End ID.")
-    status = await message.reply(f"⏳ Fetching messages **{start_id} to {end_id}**...\n*(Duplicates will be skipped)*")
     
-    added, skipped = 0, 0
-    for i in range(start_id, end_id + 1, 100):
-        ids = list(range(i, min(i + 100, end_id + 1)))
+    idx_state["is_active"] = True
+    idx_state["start"] = start_id
+    idx_state["end"] = end_id
+    idx_state["current"] = start_id
+    idx_state["added"] = 0
+    idx_state["skipped"] = 0
+    
+    await message.reply(f"⏳ **Indexing started from {start_id} to {end_id}...**\n*(Checking safely to avoid API limits. Use `/progress` to see live status)*")
+    
+    for i in range(start_id, end_id + 1, 20):
+        if not idx_state["is_active"]: break 
+        ids = list(range(i, min(i + 20, end_id + 1)))
+        idx_state["current"] = i
         try:
             msgs = await client.get_messages(DB_CHANNEL, ids)
             for m in msgs:
                 if m and not m.empty and (m.video or m.document):
                     result = await videos_col.update_one({"msg_id": m.id}, {"$setOnInsert": {"msg_id": m.id, "date": datetime.now(timezone.utc)}}, upsert=True)
-                    if result.upserted_id: added += 1
-                    else: skipped += 1
-            await asyncio.sleep(2) 
+                    if result.upserted_id: idx_state["added"] += 1
+                    else: idx_state["skipped"] += 1
+            await asyncio.sleep(2)
         except FloodWait as e: await asyncio.sleep(e.value)
-        except PeerIdInvalid: return await status.edit_text("❌ **Peer ID Invalid Error!**\nBot is blind. Send a text message like `Hello` in Database channel, then try again.")
+        except PeerIdInvalid: 
+            idx_state["is_active"] = False
+            return await message.reply("❌ **Peer ID Invalid Error!**\nBot is blind. Send a text message in Database channel, then try again.")
         except Exception: pass
         
-    await status.edit_text(f"✅ **Indexing Complete!**\n\n🆕 **New Videos Added:** `{added}`\n⏭️ **Duplicates Skipped:** `{skipped}`")
+    idx_state["is_active"] = False
+    await message.reply(f"✅ **Indexing Complete!**\n\n🆕 **New Videos Added:** `{idx_state['added']}`\n⏭️ **Duplicates Skipped:** `{idx_state['skipped']}`")
 
-# ==================== /START & VERIFY (1 DAY FOR VPLINK) ====================
+# ==================== /START & VERIFY ====================
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -430,6 +478,14 @@ async def open_premium_cb(client: Client, query: CallbackQuery):
     force = query.data == "force_buy_menu"
     await send_plan_menu(query.message, query.from_user.id, force_buy=force)
 
+# ==================== SUPPORT BUTTON ====================
+@app.on_message(filters.regex("^SUPPORT 👨‍💻$") & filters.private)
+async def support_handler(client: Client, message: Message):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👨‍💻 Message Admin", url=f"https://t.me/{ADMIN_SUPPORT.replace('@', '')}")]
+    ])
+    await message.reply("💬 **Need Help?**\n\nIf you have any issues with payments, limits, or missing videos, tap the button below to message our admin directly.", reply_markup=kb)
+
 # ==================== REFER & EARN ====================
 async def send_refer_stats(client: Client, user_id: int, message: Message):
     user = await get_user(user_id)
@@ -453,6 +509,7 @@ async def refer_handler(client: Client, message: Message): await send_refer_stat
 @app.on_message(filters.regex("^BATCH 💋$") & filters.private)
 async def batch_handler(client: Client, message: Message):
     user_id = message.from_user.id
+    
     all_vids = await videos_col.find().to_list(length=500)
     if not all_vids: return await message.reply("⚠️ No videos indexed in database channel yet.")
     
@@ -463,8 +520,20 @@ async def batch_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
         except Exception: pass
 
-# ==================== GET VIDEO ====================
-async def send_video_item(client: Client, user_id: int, chat_id: int, edit_msg: Message = None, direction="next"):
+# ==================== GET VIDEO (WITH 15 SEC COOLDOWN) ====================
+async def send_video_item(client: Client, user_id: int, chat_id: int, query: CallbackQuery = None, direction="next"):
+    now = time.time()
+    if user_id != OWNER_ID and user_id in video_cooldowns:
+        passed = now - video_cooldowns[user_id]
+        if passed < VIDEO_COOLDOWN_SEC:
+            rem = int(VIDEO_COOLDOWN_SEC - passed)
+            if query:
+                return await query.answer(f"⏳ Cool down! Wait {rem} seconds.", show_alert=True)
+            else:
+                temp_msg = await client.send_message(chat_id, f"⏳ **Cool down!** Wait `{rem}s` before getting the next video.")
+                asyncio.create_task(auto_delete_msg(temp_msg, 5))
+                return
+
     joined, btns = await check_fsub(client, user_id)
     if not joined:
         return await client.send_message(chat_id, "⚠️ **Please join all our updates channels first!**", reply_markup=InlineKeyboardMarkup(btns))
@@ -480,48 +549,60 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, edit_msg: 
             [InlineKeyboardButton("🎁 Refer & Earn (1 Day)", url=f"https://t.me/share/url?url=https://t.me/{bot_me.username}?start=ref_{user_id}")],
             [InlineKeyboardButton("💎 Buy Premium (Instant)", callback_data="force_buy_menu")]
         ])
-        text = f"⚠️ **Yᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ғʀᴇᴇ ʟɪᴍɪᴛ ({FREE_DAILY_LIMIT}/{FREE_DAILY_LIMIT})...!**\n\n🎯 **3 WAYS TO GET MORE:**\n1️⃣ **Watch Ads (Link)** → 1 ᴅᴀʏ ғʀᴇᴇ\n2️⃣ **Rᴇғᴇʀ 5 ᴜsᴇʀs** → 1 ᴅᴀʏ ғʀᴇᴇ\n3️⃣ **Bᴜʏ Pʀᴇᴍɪᴜᴍ** → Iɴsᴛᴀɴᴛ ᴀᴄᴄᴇss"
+        text = (
+            f"⚠️ **Yᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ᴅᴀɪʟʏ ғʀᴇᴇ ʟɪᴍɪᴛ ({FREE_DAILY_LIMIT}/{FREE_DAILY_LIMIT})...!**\n\n"
+            "⏳ *Come back tomorrow for 50 new videos, or unlock unlimited access right now!*\n\n"
+            "🎯 **3 WAYS TO GET MORE:**\n"
+            "1️⃣ **Watch Ads (Link)** → 1 ᴅᴀʏ ғʀᴇᴇ\n"
+            "2️⃣ **Rᴇғᴇʀ 5 ᴜsᴇʀs** → 1 ᴅᴀʏ ғʀᴇᴇ\n"
+            "3️⃣ **Bᴜʏ Pʀᴇᴍɪᴜᴍ** → Iɴsᴛᴀɴᴛ ᴀᴄᴄᴇss"
+        )
         return await client.send_message(chat_id, text, reply_markup=kb)
 
     all_vids = await videos_col.find().sort("msg_id", 1).to_list(length=10000)
     if not all_vids: return await client.send_message(chat_id, "⚠️ **No videos found in DB!** Run `/index 1 100`.")
 
     current_idx = user.get("video_index", 0)
+    
     if direction == "prev":
         current_idx -= 2  
         if current_idx < 0: current_idx = len(all_vids) - 1
-    if current_idx >= len(all_vids): current_idx = 0 
+        
+    if current_idx >= len(all_vids): 
+        current_idx = 0 
         
     chosen = all_vids[current_idx]
     await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}, "$set": {"video_index": current_idx + 1}})
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏮ LAST", callback_data="nav_video_prev"), InlineKeyboardButton("▶ NEXT", callback_data="nav_video_next")],
+        [InlineKeyboardButton("⏮ PREVIOUS", callback_data="nav_video_prev"), InlineKeyboardButton("▶ NEXT", callback_data="nav_video_next")],
         [InlineKeyboardButton("🔞 VIRAL VIDEOS STUFF 👑", url=PROMO_CHANNEL_URL)]
     ])
 
     try:
-        if edit_msg:
-            try: await edit_msg.delete()
+        if query and query.message:
+            try: await query.message.delete()
             except Exception: pass
             
         caption_text = "⏳ **This video will expire in 5 minutes! Save it ASAP!**"
         sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption=caption_text, reply_markup=kb, protect_content=not prem)
+        
+        video_cooldowns[user_id] = time.time()
         asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
         
     except PeerIdInvalid: await client.send_message(chat_id, "⚠️ Bot is blind to Database Channel. Admin must send a text message in the DB channel.")
     except Exception as e: await client.send_message(chat_id, f"⚠️ Error fetching video: `{e}`")
 
 @app.on_message(filters.regex("^GET VIDEO 🍭$") & filters.private)
-async def get_video_handler(client: Client, message: Message): await send_video_item(client, message.from_user.id, message.chat.id, direction="next")
+async def get_video_handler(client: Client, message: Message): 
+    await send_video_item(client, message.from_user.id, message.chat.id, direction="next")
 
 @app.on_callback_query(filters.regex("^nav_video_(.+)$"))
 async def nav_video_cb(client: Client, query: CallbackQuery):
     direction = query.data.split("_")[2] 
-    await query.answer()
-    await send_video_item(client, query.from_user.id, query.message.chat.id, edit_msg=query.message, direction=direction)
+    await send_video_item(client, query.from_user.id, query.message.chat.id, query=query, direction=direction)
 
-# ==================== MANUAL PAYMENT SYSTEM ====================
+# ==================== MANUAL SCREENSHOT + UTR PAYMENT SYSTEM ====================
 @app.on_callback_query(filters.regex("^buy_(.+)$"))
 async def create_order_cb(client: Client, query: CallbackQuery):
     plan_key = query.data.split("_")[1]
