@@ -321,6 +321,7 @@ async def help_cmd(client: Client, message: Message):
         "🔹 `/start` - Start the bot & verify\n"
         "🔹 `PLAN STATUS 🏷` - Check premium status\n"
         "🔹 `GET VIDEO 🍭` - Fetch a new video\n"
+        "🔹 `/find <id>` - Get specific video by Index ID\n"
         "🔹 `BATCH 💋` - Get 4 videos at once (Premium)\n"
         "🔹 `REFER 👥` - Get your referral link\n"
         "🔹 `BUY PREMIUM` - Purchase a plan\n\n"
@@ -337,7 +338,6 @@ async def help_cmd(client: Client, message: Message):
             "🔸 `/ping` - View CPU/RAM/Storage\n"
             "🔸 `/broadcast` - (Reply) Send to all\n"
             "🔸 `/index <start> <end>` - Index DB\n"
-            "🔸 `/find <id>` - Get specific video by Index ID\n"
             "🔸 `/delete <id>` - Delete video by Index ID\n"
             "🔸 `/maintenance` - Toggle Maintenance Mode\n"
             "🔸 `/premium` - Toggle Premium-Only Mode\n"
@@ -377,19 +377,47 @@ async def logs_cmd(client: Client, message: Message):
     else:
         await message.reply("No log file found yet.")
 
-# ==================== OTHER ADMIN COMMANDS ====================
-@app.on_message(filters.command("find"))
+# ==================== FIND & DELETE (VIDEO DB) ====================
+@app.on_message(filters.command("find") & filters.private)
 async def find_cmd(client: Client, message: Message):
-    if not await check_admin(message.from_user.id, "read"): return
-    if len(message.command) < 2: return await message.reply("Usage: `/find <index_id>`\n*(The index_id is the Telegram message ID of the video in the DB channel)*")
-    try: msg_id = int(message.command[1])
-    except ValueError: return await message.reply("❌ Invalid ID. Must be a number.")
-    
+    user_id = message.from_user.id
+    if len(message.command) < 2: 
+        return await message.reply("Usage: `/find <video_id>`\n*(Example: `/find 152`)*")
+    try: 
+        msg_id = int(message.command[1])
+    except ValueError: 
+        return await message.reply("❌ Invalid ID. Must be a number.")
+
+    joined, btns = await check_fsub(client, user_id)
+    if not joined:
+        return await message.reply("⚠️ **Please join all our channels first!**", reply_markup=InlineKeyboardMarkup(btns))
+
+    user = await get_user(user_id)
+    prem = await is_premium(user_id)
+    is_adm = await check_admin(user_id, "read") 
+
+    if not prem and not is_adm:
+        if user.get("daily_count", 0) >= FREE_DAILY_LIMIT:
+            bot_me = await client.get_me()
+            verify_short_url = await get_verify_link(client, user_id)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Watch Ads (1 Day)", url=verify_short_url)],
+                [InlineKeyboardButton("🎁 Refer & Earn (1 Day)", url=f"https://t.me/share/url?url=https://t.me/{bot_me.username}?start=ref_{user_id}")],
+                [InlineKeyboardButton("💎 Buy Premium (Instant)", callback_data="force_buy_menu")]
+            ])
+            text = f"⚠️ **Yᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ᴅᴀɪʟʏ ғʀᴇᴇ ʟɪᴍɪᴛ ({FREE_DAILY_LIMIT}/{FREE_DAILY_LIMIT})...!**\n\n⏳ *Come back tomorrow for 50 new videos, or unlock unlimited access right now!*"
+            return await message.reply(text, reply_markup=kb)
+
     vid = await videos_col.find_one({"msg_id": msg_id})
     if not vid: return await message.reply("❌ Video not found in the database.")
     
+    if not prem and not is_adm:
+        await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}})
+
     try:
-        await client.copy_message(chat_id=message.chat.id, from_chat_id=DB_CHANNEL, message_id=msg_id, protect_content=True)
+        caption_text = f"🍿 **Video ID:** `{msg_id}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
+        sent = await client.copy_message(chat_id=message.chat.id, from_chat_id=DB_CHANNEL, message_id=msg_id, caption=caption_text, protect_content=True)
+        asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
     except Exception as e:
         await message.reply(f"⚠️ Error sending video: {e}")
 
@@ -406,6 +434,7 @@ async def delete_cmd(client: Client, message: Message):
     else:
         await message.reply("❌ Video not found in the database.")
 
+# ==================== OTHER ADMIN COMMANDS ====================
 @app.on_message(filters.command("remove"))
 async def remove_premium_cmd(client: Client, message: Message):
     if not await check_admin(message.from_user.id, "edit"): return
@@ -761,9 +790,9 @@ async def batch_handler(client: Client, message: Message):
     if not all_vids: return await message.reply("⚠️ No videos indexed.")
     batch_cooldowns[user_id] = time.time()
     
-    caption_text = "⏳ **This video will expire in 5 minutes! Save it ASAP!**"
     for v in random.sample(all_vids, min(4, len(all_vids))):
         try:
+            caption_text = f"🍿 **Video ID:** `{v['msg_id']}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
             sent = await client.copy_message(chat_id=user_id, from_chat_id=DB_CHANNEL, message_id=v["msg_id"], caption=caption_text, protect_content=True)
             asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
         except: pass
@@ -820,7 +849,8 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
             try: await query.message.delete()
             except: pass
             
-        sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption="⏳ **This video will expire in 5 minutes! Save it ASAP!**", reply_markup=kb, protect_content=True)
+        caption_text = f"🍿 **Video ID:** `{chosen['msg_id']}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
+        sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption=caption_text, reply_markup=kb, protect_content=True)
         video_cooldowns[user_id] = time.time()
         asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
     except PeerIdInvalid: await client.send_message(chat_id, "⚠️ Bot is blind to Database Channel. Send a text message inside DB.")
