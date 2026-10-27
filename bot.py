@@ -88,12 +88,12 @@ SPAM_BLOCK_DURATION = 300
 
 START_TIME = time.time()
 
-# ==================== GLOBAL HELPER FUNCTION (FIX FOR THE CRASH) ====================
+# ==================== GLOBAL HELPER FUNCTION ====================
 async def auto_delete_msg(msg: Message, delay: int = AUTO_DELETE_SECONDS):
     await asyncio.sleep(delay)
     try: await msg.delete()
     except Exception: pass
-# ====================================================================================
+# ================================================================
 
 app = Client("Pookie69Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -253,16 +253,14 @@ async def sudo_perm_cb(client: Client, query: CallbackQuery):
     
     await query.edit_message_reply_markup(reply_markup=build_sudo_kb(uid, updated))
 
-# ==================== GLOBAL ACCESS GATES (SPAM, MAINTENANCE, PREMIUM) ====================
+# ==================== GLOBAL ACCESS GATES ====================
 @app.on_message(filters.private, group=-2)
 async def global_message_gate(client: Client, message: Message):
     if not message.from_user: return
     uid = message.from_user.id
     
-    # 1. Banned Check
     if uid in banned_users: raise StopPropagation
         
-    # 2. Spam Check
     if uid != OWNER_ID:
         now = time.time()
         if uid in spam_blocked_until:
@@ -281,7 +279,6 @@ async def global_message_gate(client: Client, message: Message):
             await message.reply(f"🚫 {message.from_user.mention}, **SPAM DETECTED!**\nYou are blocked for 5 minutes.")
             raise StopPropagation
 
-    # 3. Settings Check (Maintenance & Premium)
     is_adm = await check_admin(uid)
     if not is_adm:
         settings = await settings_col.find_one({"_id": "global"}) or {}
@@ -340,6 +337,8 @@ async def help_cmd(client: Client, message: Message):
             "🔸 `/ping` - View CPU/RAM/Storage\n"
             "🔸 `/broadcast` - (Reply) Send to all\n"
             "🔸 `/index <start> <end>` - Index DB\n"
+            "🔸 `/find <id>` - Get specific video by Index ID\n"
+            "🔸 `/delete <id>` - Delete video by Index ID\n"
             "🔸 `/maintenance` - Toggle Maintenance Mode\n"
             "🔸 `/premium` - Toggle Premium-Only Mode\n"
             "🔸 `/logs` - Download bot log file\n"
@@ -379,6 +378,34 @@ async def logs_cmd(client: Client, message: Message):
         await message.reply("No log file found yet.")
 
 # ==================== OTHER ADMIN COMMANDS ====================
+@app.on_message(filters.command("find"))
+async def find_cmd(client: Client, message: Message):
+    if not await check_admin(message.from_user.id, "read"): return
+    if len(message.command) < 2: return await message.reply("Usage: `/find <index_id>`\n*(The index_id is the Telegram message ID of the video in the DB channel)*")
+    try: msg_id = int(message.command[1])
+    except ValueError: return await message.reply("❌ Invalid ID. Must be a number.")
+    
+    vid = await videos_col.find_one({"msg_id": msg_id})
+    if not vid: return await message.reply("❌ Video not found in the database.")
+    
+    try:
+        await client.copy_message(chat_id=message.chat.id, from_chat_id=DB_CHANNEL, message_id=msg_id, protect_content=True)
+    except Exception as e:
+        await message.reply(f"⚠️ Error sending video: {e}")
+
+@app.on_message(filters.command(["del", "delete"]))
+async def delete_cmd(client: Client, message: Message):
+    if not await check_admin(message.from_user.id, "edit"): return
+    if len(message.command) < 2: return await message.reply("Usage: `/delete <index_id>`")
+    try: msg_id = int(message.command[1])
+    except ValueError: return await message.reply("❌ Invalid ID. Must be a number.")
+    
+    res = await videos_col.delete_one({"msg_id": msg_id})
+    if res.deleted_count > 0:
+        await message.reply(f"✅ Video with Index ID `{msg_id}` deleted from database.")
+    else:
+        await message.reply("❌ Video not found in the database.")
+
 @app.on_message(filters.command("remove"))
 async def remove_premium_cmd(client: Client, message: Message):
     if not await check_admin(message.from_user.id, "edit"): return
@@ -737,7 +764,6 @@ async def batch_handler(client: Client, message: Message):
     caption_text = "⏳ **This video will expire in 5 minutes! Save it ASAP!**"
     for v in random.sample(all_vids, min(4, len(all_vids))):
         try:
-            # FIX: protect_content=True to disable forwarding for Batch
             sent = await client.copy_message(chat_id=user_id, from_chat_id=DB_CHANNEL, message_id=v["msg_id"], caption=caption_text, protect_content=True)
             asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
         except: pass
@@ -794,7 +820,6 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
             try: await query.message.delete()
             except: pass
             
-        # FIX: protect_content=True for everyone, premium or non-premium
         sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption="⏳ **This video will expire in 5 minutes! Save it ASAP!**", reply_markup=kb, protect_content=True)
         video_cooldowns[user_id] = time.time()
         asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
