@@ -535,12 +535,34 @@ async def send_refer_stats(client: Client, user_id: int, message: Message):
 @app.on_message(filters.regex("^REFER 👥$") & filters.private)
 async def refer_handler(client: Client, message: Message): await send_refer_stats(client, message.from_user.id, message)
 
-# ==================== BATCH COMMAND (UNLOCKED FOR ALL) ====================
+# ==================== BATCH COMMAND (PREMIUM ONLY) ====================
 @app.on_message(filters.regex("^BATCH 💋$") & filters.private)
 async def batch_handler(client: Client, message: Message):
     user_id = message.from_user.id
     
-    # 1. Check for 1-minute batch cooldown
+    # 1. Force Sub Check FIRST (Applies to everyone)
+    joined, btns = await check_fsub(client, user_id)
+    if not joined:
+        return await message.reply(
+            "⚠️ **Please join all our updates channels first!**\n\n"
+            "👉 *Please check if you have joined these channels one by one, then click TRY AGAIN.*", 
+            reply_markup=InlineKeyboardMarkup(btns)
+        )
+
+    # 2. Check if user is premium
+    prem = await is_premium(user_id)
+    if not prem:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💎 Buy Premium (Instant)", callback_data="force_buy_menu")]
+        ])
+        return await message.reply(
+            "⚠️ **PREMIUM EXCLUSIVE FEATURE!**\n\n"
+            "The `BATCH 💋` command is only available for Premium members.\n"
+            "Upgrade your plan to get 4 videos at once without limits!", 
+            reply_markup=kb
+        )
+    
+    # 3. Check for 1-minute batch cooldown
     now = time.time()
     if user_id != OWNER_ID and user_id in batch_cooldowns:
         passed = now - batch_cooldowns[user_id]
@@ -559,7 +581,7 @@ async def batch_handler(client: Client, message: Message):
     
     caption_text = "⏳ **This video will expire in 5 minutes! Save it ASAP!**"
     
-    # 2. Limit to exactly 4 videos
+    # 4. Limit to exactly 4 videos
     for v in random.sample(all_vids, min(4, len(all_vids))):
         try:
             sent = await client.copy_message(
