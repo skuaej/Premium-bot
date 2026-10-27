@@ -81,7 +81,6 @@ spam_notified = set()
 pending_proofs = {}
 pending_utr = {}
 
-# ✅ UPDATED PRICING
 PLANS = {
     "1d": {"name": "1 DAY", "price": 9, "days": 1},
     "7d": {"name": "7 DAYS", "price": 24, "days": 7},
@@ -100,21 +99,18 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ==================== ANTI-SPAM GATEKEEPER ====================
+# ==================== ANTI-SPAM ====================
 def check_spam(user_id: int):
     now = time.time()
     if user_id in spam_blocked_until:
-        if now < spam_blocked_until[user_id]:
-            return True, int(spam_blocked_until[user_id] - now), False
+        if now < spam_blocked_until[user_id]: return True, int(spam_blocked_until[user_id] - now), False
         else:
             del spam_blocked_until[user_id]
             spam_notified.discard(user_id)
-
     hits = user_activity.get(user_id, [])
     hits = [t for t in hits if now - t <= SPAM_WINDOW_SEC]
     hits.append(now)
     user_activity[user_id] = hits
-
     if len(hits) > SPAM_MAX_HITS:
         spam_blocked_until[user_id] = now + SPAM_BLOCK_DURATION
         user_activity[user_id] = []
@@ -126,16 +122,12 @@ async def anti_spam_message_gate(client: Client, message: Message):
     if not message.from_user: return
     uid = message.from_user.id
     if uid == OWNER_ID: return
-
     blocked, rem, newly_blocked = check_spam(uid)
     if blocked:
         mins, secs = divmod(rem, 60)
         if newly_blocked or uid not in spam_notified:
             spam_notified.add(uid)
-            await message.reply(
-                f"🚫 {message.from_user.mention}, **SPAM DETECTED!**\n\n"
-                f"You are sending requests too fast. You have been blocked for `{mins}m {secs}s`."
-            )
+            await message.reply(f"🚫 {message.from_user.mention}, **SPAM DETECTED!**\n\nYou are blocked for `{mins}m {secs}s`.")
         raise StopPropagation
 
 @app.on_callback_query(group=-1)
@@ -143,14 +135,13 @@ async def anti_spam_callback_gate(client: Client, query: CallbackQuery):
     if not query.from_user: return
     uid = query.from_user.id
     if uid == OWNER_ID: return
-
     blocked, rem, newly_blocked = check_spam(uid)
     if blocked:
         mins, secs = divmod(rem, 60)
         await query.answer(f"🚫 SPAM DETECTED! Wait {mins}m {secs}s.", show_alert=True)
         raise StopPropagation
 
-# ==================== DATABASE HELPERS ====================
+# ==================== DB HELPERS ====================
 async def get_user(user_id: int):
     user = await users_col.find_one({"_id": user_id})
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -158,8 +149,7 @@ async def get_user(user_id: int):
         user = {
             "_id": user_id, "referrals": 0, "ref_points": 0, "referred_by": None,
             "premium_expiry": None, "daily_count": 0, "last_reset": today_str,
-            "verify_token": None, "joined_at": datetime.now(timezone.utc),
-            "video_index": 0
+            "verify_token": None, "joined_at": datetime.now(timezone.utc), "video_index": 0
         }
         await users_col.insert_one(user)
     else:
@@ -211,19 +201,30 @@ async def get_verify_link(client: Client, user_id: int) -> str:
     except Exception: pass
     return FALLBACK_SHORT_LINK
 
-# ==================== STRICT FORCE SUBSCRIBE ====================
+# ==================== STRICT FORCE SUBSCRIBE (HTTP API BYPASS) ====================
 async def check_fsub(client: Client, user_id: int):
     if user_id == OWNER_ID: return True, []
     missing_buttons = []
-    for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
-        is_member = False
-        try:
-            member = await client.get_chat_member(ch_id, user_id)
-            if member.status in [ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER]: is_member = True
-        except Exception: is_member = False
-        if not is_member:
-            link = FSUB_LINKS.get(ch_id, "https://t.me/telegram")
-            missing_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
+    
+    # Using Raw Telegram API to completely bypass Pyrogram's PeerIdInvalid cache issues
+    async with aiohttp.ClientSession() as session:
+        for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
+            is_member = False
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember?chat_id={ch_id}&user_id={user_id}"
+            try:
+                async with session.get(url, timeout=5) as resp:
+                    data = await resp.json()
+                    if data.get("ok"):
+                        status = data["result"]["status"]
+                        if status in ["member", "administrator", "creator"]:
+                            is_member = True
+            except Exception as e:
+                print(f"⚠️ API Fetch Error for Channel {idx}: {e}")
+                
+            if not is_member:
+                link = FSUB_LINKS.get(ch_id, "https://t.me/telegram")
+                missing_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
+                
     if missing_buttons:
         missing_buttons.append([InlineKeyboardButton("🔄 TRY AGAIN", callback_data="check_fsub")])
         return False, missing_buttons
@@ -242,9 +243,8 @@ async def add_premium_cmd(client: Client, message: Message):
         uid = int(message.command[1])
         days = int(message.command[2])
     except ValueError: return await message.reply("❌ Invalid format. User ID and Days must be numbers.")
-    
     new_exp = await add_premium(uid, days)
-    await message.reply(f"✅ Successfully added **{days} Days** Premium to `{uid}`.\n📅 Expires on: `{new_exp.strftime('%d %b %Y, %I:%M %p')} UTC`")
+    await message.reply(f"✅ Added **{days} Days** Premium to `{uid}`.\n📅 Expires on: `{new_exp.strftime('%d %b %Y, %I:%M %p')} UTC`")
     try: await client.send_message(uid, f"🎉 **Admin added {days} Days Premium to your account!**\n📅 **Expires on:** `{new_exp.strftime('%d %b %Y, %I:%M %p')} UTC`")
     except Exception: pass
 
@@ -323,7 +323,7 @@ async def manual_index(client: Client, message: Message):
         
     await status.edit_text(f"✅ **Indexing Complete!**\n\n🆕 **New Videos Added:** `{added}`\n⏭️ **Duplicates Skipped:** `{skipped}`")
 
-# ==================== /START & VERIFY ====================
+# ==================== /START & VERIFY (1 DAY FOR VPLINK) ====================
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -372,12 +372,12 @@ async def fsub_callback(client: Client, query: CallbackQuery):
     await query.message.delete()
     await query.message.reply("✅ **Thank you for joining!** Use the menu below:", reply_markup=MAIN_KEYBOARD)
 
-# ==================== PLAN STATUS / BUY PREMIUM ====================
-async def send_plan_menu(message: Message, user_id: int):
+# ==================== PLAN STATUS ====================
+async def send_plan_menu(message: Message, user_id: int, force_buy=False):
     user = await get_user(user_id)
     prem = await is_premium(user_id)
     
-    if prem:
+    if prem and not force_buy:
         exp = user.get("premium_expiry")
         if exp and isinstance(exp, datetime):
             if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
@@ -395,12 +395,13 @@ async def send_plan_menu(message: Message, user_id: int):
             "✦ Forward & Download Enabled ✅\n"
             "━━━━━━━━━━━━━━━━━━"
         )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("👨‍💻 Contact Support", url=f"https://t.me/{ADMIN_SUPPORT.replace('@', '')}")]])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Extend Premium", callback_data="force_buy_menu")],
+            [InlineKeyboardButton("👨‍💻 Contact Support", url=f"https://t.me/{ADMIN_SUPPORT.replace('@', '')}")]
+        ])
         return await message.reply(text, reply_markup=kb)
         
     daily_count = user.get("daily_count", 0)
-    
-    # ✅ PRICING BUTTONS UPDATED
     text = (
         "💳 **CHOOSE A PLAN**\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
@@ -419,12 +420,15 @@ async def send_plan_menu(message: Message, user_id: int):
     await message.reply(text, reply_markup=kb)
 
 @app.on_message(filters.regex("^(PLAN STATUS 🏷|BUY PREMIUM)$") & filters.private)
-async def plan_status_handler(client: Client, message: Message): await send_plan_menu(message, message.from_user.id)
+async def plan_status_handler(client: Client, message: Message): 
+    is_buy_click = message.text == "BUY PREMIUM"
+    await send_plan_menu(message, message.from_user.id, force_buy=is_buy_click)
 
-@app.on_callback_query(filters.regex("^open_premium$"))
+@app.on_callback_query(filters.regex("^(open_premium|force_buy_menu)$"))
 async def open_premium_cb(client: Client, query: CallbackQuery):
     await query.answer()
-    await send_plan_menu(query.message, query.from_user.id)
+    force = query.data == "force_buy_menu"
+    await send_plan_menu(query.message, query.from_user.id, force_buy=force)
 
 # ==================== REFER & EARN ====================
 async def send_refer_stats(client: Client, user_id: int, message: Message):
@@ -445,21 +449,10 @@ async def send_refer_stats(client: Client, user_id: int, message: Message):
 @app.on_message(filters.regex("^REFER 👥$") & filters.private)
 async def refer_handler(client: Client, message: Message): await send_refer_stats(client, message.from_user.id, message)
 
-# ==================== BATCH COMMAND ====================
+# ==================== BATCH COMMAND (UNLOCKED FOR ALL) ====================
 @app.on_message(filters.regex("^BATCH 💋$") & filters.private)
 async def batch_handler(client: Client, message: Message):
     user_id = message.from_user.id
-    bot_me = await client.get_me()
-    if not await is_premium(user_id):
-        verify_short_url = await get_verify_link(client, user_id)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Watch Ads (1 Day)", url=verify_short_url)],
-            [InlineKeyboardButton("🎁 Refer & Earn (1 Day)", url=f"https://t.me/share/url?url=https://t.me/{bot_me.username}?start=ref_{user_id}")],
-            [InlineKeyboardButton("💎 Buy Premium (Instant)", callback_data="open_premium")]
-        ])
-        text = "🚫 **Pʀᴇᴍɪᴜᴍ Oɴʟʏ Fᴇᴀᴛᴜʀᴇ**\n━━━━━━━━━━━━━━━━━━\n\n⚡ *BATCH COMMAND IS LOCKED*\n💎 Oɴʟʏ **Pʀᴇᴍɪᴜᴍ ᴜsᴇʀs ᴄᴀɴ ᴜsᴇ ɪᴛ**\n━━━━━━━━━━━━━━━━━━\n\n🎯 **3 WAYS TO GET PREMIUM:**\n\n1️⃣ **Watch Ads (Link)** → 1 ᴅᴀʏ ғʀᴇᴇ\n2️⃣ **Rᴇғᴇʀ 5 ᴜsᴇʀs** → 1 ᴅᴀʏ ғʀᴇᴇ\n3️⃣ **Bᴜʏ Pʀᴇᴍɪᴜᴍ** → Iɴsᴛᴀɴᴛ ᴀᴄᴄᴇss\n\n👇 **Cʜᴏᴏsᴇ ᴀɴ ᴏᴘᴛɪᴏɴ ʙᴇʟᴏᴡ**"
-        return await message.reply(text, reply_markup=kb)
-    
     all_vids = await videos_col.find().to_list(length=500)
     if not all_vids: return await message.reply("⚠️ No videos indexed in database channel yet.")
     
@@ -485,7 +478,7 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, edit_msg: 
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Watch Ads (1 Day)", url=verify_short_url)],
             [InlineKeyboardButton("🎁 Refer & Earn (1 Day)", url=f"https://t.me/share/url?url=https://t.me/{bot_me.username}?start=ref_{user_id}")],
-            [InlineKeyboardButton("💎 Buy Premium (Instant)", callback_data="open_premium")]
+            [InlineKeyboardButton("💎 Buy Premium (Instant)", callback_data="force_buy_menu")]
         ])
         text = f"⚠️ **Yᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ғʀᴇᴇ ʟɪᴍɪᴛ ({FREE_DAILY_LIMIT}/{FREE_DAILY_LIMIT})...!**\n\n🎯 **3 WAYS TO GET MORE:**\n1️⃣ **Watch Ads (Link)** → 1 ᴅᴀʏ ғʀᴇᴇ\n2️⃣ **Rᴇғᴇʀ 5 ᴜsᴇʀs** → 1 ᴅᴀʏ ғʀᴇᴇ\n3️⃣ **Bᴜʏ Pʀᴇᴍɪᴜᴍ** → Iɴsᴛᴀɴᴛ ᴀᴄᴄᴇss"
         return await client.send_message(chat_id, text, reply_markup=kb)
@@ -494,13 +487,10 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, edit_msg: 
     if not all_vids: return await client.send_message(chat_id, "⚠️ **No videos found in DB!** Run `/index 1 100`.")
 
     current_idx = user.get("video_index", 0)
-    
     if direction == "prev":
         current_idx -= 2  
         if current_idx < 0: current_idx = len(all_vids) - 1
-        
-    if current_idx >= len(all_vids): 
-        current_idx = 0 
+    if current_idx >= len(all_vids): current_idx = 0 
         
     chosen = all_vids[current_idx]
     await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}, "$set": {"video_index": current_idx + 1}})
@@ -531,7 +521,7 @@ async def nav_video_cb(client: Client, query: CallbackQuery):
     await query.answer()
     await send_video_item(client, query.from_user.id, query.message.chat.id, edit_msg=query.message, direction=direction)
 
-# ==================== MANUAL SCREENSHOT + UTR PAYMENT SYSTEM ====================
+# ==================== MANUAL PAYMENT SYSTEM ====================
 @app.on_callback_query(filters.regex("^buy_(.+)$"))
 async def create_order_cb(client: Client, query: CallbackQuery):
     plan_key = query.data.split("_")[1]
@@ -633,7 +623,7 @@ async def admin_reject_cb(client: Client, query: CallbackQuery):
         await client.send_message(order["user_id"], f"❌ **Payment Rejected!**\n\nYour payment for Order `{order_id}` could not be verified. If this is a mistake, contact support below.", reply_markup=kb)
     except Exception: pass
 
-# ==================== DUMMY WEB SERVER FOR CLOUD DEPLOY (KOYEB/RENDER) ====================
+# ==================== DUMMY WEB SERVER (KOYEB/RENDER) ====================
 async def web_handler(request):
     return web.Response(text="Bot is running smoothly 24/7!")
 
