@@ -54,10 +54,10 @@ SHORTENER_DOMAIN = "vplink.in"
 FALLBACK_SHORT_LINK = "https://vplink.in/WOODZ2"
 
 QR_IMAGE_URL = "https://i.ibb.co/LDyTb5S9/Screenshot-20261027-124013-Nekogram.jpg"  
-ADMIN_SUPPORT = "@DumpAdminBot"
+ADMIN_SUPPORT = "@Prettttyyyyyyyyyy"
 PROMO_CHANNEL_URL = "https://t.me/telegram"
 
-FREE_DAILY_LIMIT = 100
+FREE_DAILY_LIMIT = 50
 AUTO_DELETE_SECONDS = 300  
 
 SPAM_MAX_HITS = 4
@@ -81,13 +81,14 @@ spam_notified = set()
 pending_proofs = {}
 pending_utr = {}
 
+# ✅ UPDATED PRICING
 PLANS = {
-    "1d": {"name": "1 DAY", "price": 15, "days": 1},
-    "7d": {"name": "7 DAYS", "price": 40, "days": 7},
-    "1m": {"name": "1 MONTH", "price": 100, "days": 30},
-    "3m": {"name": "3 MONTHS", "price": 250, "days": 90},
-    "6m": {"name": "6 MONTHS", "price": 450, "days": 180},
-    "1y": {"name": "1 YEAR", "price": 800, "days": 365},
+    "1d": {"name": "1 DAY", "price": 9, "days": 1},
+    "7d": {"name": "7 DAYS", "price": 24, "days": 7},
+    "1m": {"name": "1 MONTH", "price": 60, "days": 30},
+    "3m": {"name": "3 MONTHS", "price": 150, "days": 90},
+    "6m": {"name": "6 MONTHS", "price": 270, "days": 180},
+    "1y": {"name": "1 YEAR", "price": 480, "days": 365},
 }
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -289,7 +290,6 @@ async def unblock_cmd(client: Client, message: Message):
     spam_notified.discard(uid)
     await message.reply(f"✅ User `{uid}` unblocked from spam cooldown!")
 
-# ==================== ADVANCED INDEX DB CHANNEL VIDEOS ====================
 @app.on_message(filters.command("index") & filters.user(OWNER_ID))
 async def manual_index(client: Client, message: Message):
     if len(message.command) == 2:
@@ -323,7 +323,7 @@ async def manual_index(client: Client, message: Message):
         
     await status.edit_text(f"✅ **Indexing Complete!**\n\n🆕 **New Videos Added:** `{added}`\n⏭️ **Duplicates Skipped:** `{skipped}`")
 
-# ==================== /START & VERIFY (1 DAY FOR VPLINK) ====================
+# ==================== /START & VERIFY ====================
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -375,8 +375,32 @@ async def fsub_callback(client: Client, query: CallbackQuery):
 # ==================== PLAN STATUS / BUY PREMIUM ====================
 async def send_plan_menu(message: Message, user_id: int):
     user = await get_user(user_id)
+    prem = await is_premium(user_id)
+    
+    if prem:
+        exp = user.get("premium_expiry")
+        if exp and isinstance(exp, datetime):
+            if exp.tzinfo is None: exp = exp.replace(tzinfo=timezone.utc)
+            exp_str = exp.strftime("%d %b %Y, %I:%M %p UTC")
+        else:
+            exp_str = "Unknown"
+            
+        text = (
+            "💎 **ACTIVE PREMIUM STATUS**\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"✅ **Status:** `Premium Active`\n"
+            f"📅 **Expires On:** `{exp_str}`\n\n"
+            "✦ BATCH Command Unlocked 🔓\n"
+            "✦ Unlimited Video Access 🍿\n"
+            "✦ Forward & Download Enabled ✅\n"
+            "━━━━━━━━━━━━━━━━━━"
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("👨‍💻 Contact Support", url=f"https://t.me/{ADMIN_SUPPORT.replace('@', '')}")]])
+        return await message.reply(text, reply_markup=kb)
+        
     daily_count = user.get("daily_count", 0)
     
+    # ✅ PRICING BUTTONS UPDATED
     text = (
         "💳 **CHOOSE A PLAN**\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
@@ -388,9 +412,9 @@ async def send_plan_menu(message: Message, user_id: int):
         "👇 **Sᴇʟᴇᴄᴛ ʏᴏᴜʀ ᴘʟᴀɴ:**"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("1 DAY · ₹15", callback_data="buy_1d"), InlineKeyboardButton("7 DAYS · ₹40", callback_data="buy_7d")],
-        [InlineKeyboardButton("1 MONTH · ₹100", callback_data="buy_1m"), InlineKeyboardButton("3 MONTHS · ₹250", callback_data="buy_3m")],
-        [InlineKeyboardButton("6 MONTHS · ₹450", callback_data="buy_6m"), InlineKeyboardButton("1 YEAR · ₹800", callback_data="buy_1y")]
+        [InlineKeyboardButton("1 DAY · ₹9", callback_data="buy_1d"), InlineKeyboardButton("7 DAYS · ₹24", callback_data="buy_7d")],
+        [InlineKeyboardButton("1 MONTH · ₹60", callback_data="buy_1m"), InlineKeyboardButton("3 MONTHS · ₹150", callback_data="buy_3m")],
+        [InlineKeyboardButton("6 MONTHS · ₹270", callback_data="buy_6m"), InlineKeyboardButton("1 YEAR · ₹480", callback_data="buy_1y")]
     ])
     await message.reply(text, reply_markup=kb)
 
@@ -446,7 +470,7 @@ async def batch_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
         except Exception: pass
 
-# ==================== GET VIDEO (WITH NEXT/PREV) ====================
+# ==================== GET VIDEO ====================
 async def send_video_item(client: Client, user_id: int, chat_id: int, edit_msg: Message = None, direction="next"):
     joined, btns = await check_fsub(client, user_id)
     if not joined:
