@@ -87,7 +87,13 @@ SPAM_WINDOW_SEC = 5
 SPAM_BLOCK_DURATION = 300  
 
 START_TIME = time.time()
-# =======================================================
+
+# ==================== GLOBAL HELPER FUNCTION (FIX FOR THE CRASH) ====================
+async def auto_delete_msg(msg: Message, delay: int = AUTO_DELETE_SECONDS):
+    await asyncio.sleep(delay)
+    try: await msg.delete()
+    except Exception: pass
+# ====================================================================================
 
 app = Client("Pookie69Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -650,7 +656,7 @@ async def send_plan_menu(message: Message, user_id: int, force_buy=False, is_cb=
         else: exp_str = "Unknown"
         text = (f"💎 **ACTIVE PREMIUM STATUS**\n━━━━━━━━━━━━━━━━━━\n\n✅ **Status:** `Premium Active`\n"
                 f"📅 **Expires On:** `{exp_str}`\n\n✦ BATCH Command Unlocked 🔓\n✦ Unlimited Video Access 🍿\n"
-                f"✦ Forward & Download Enabled ✅\n━━━━━━━━━━━━━━━━━━")
+                f"✦ Forward & Download Disabled 🔒\n━━━━━━━━━━━━━━━━━━")
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("💳 Extend Premium", callback_data="force_buy_menu")],
             [InlineKeyboardButton("👨‍💻 Contact Support", url=f"https://t.me/{ADMIN_SUPPORT.replace('@', '')}")]
@@ -662,7 +668,7 @@ async def send_plan_menu(message: Message, user_id: int, force_buy=False, is_cb=
         
     limit_disp = "♾️ UNLIMITED (Premium)" if prem else f"{user.get('daily_count', 0)} / {FREE_DAILY_LIMIT}"
     text = (f"💳 **CHOOSE A PLAN**\n━━━━━━━━━━━━━━━━━━\n\n📊 **Limit:** `{limit_disp}`\n🏦 PAYTM • UPI • PHONEPE • GPAY\n\n"
-            f"✦ Pʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴀᴛᴇs ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʏ ᴀғᴛᴇʀ ᴘᴀʏᴍᴇɴᴛ\n✦ Fᴏʀᴡᴀʀᴅ & Dᴏᴡɴʟᴏᴀᴅ ᴇɴᴀʙʟᴇᴅ ✅\n━━━━━━━━━━━━━━━━━━\n👇 **Sᴇʟᴇᴄᴛ ʏᴏᴜʀ ᴘʟᴀɴ:**")
+            f"✦ Pʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴀᴛᴇs ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʏ ᴀғᴛᴇʀ ᴘᴀʏᴍᴇɴᴛ\n✦ Vɪᴅᴇᴏ Fᴏʀᴡᴀʀᴅɪɴɢ ɪs Disabled 🔒\n━━━━━━━━━━━━━━━━━━\n👇 **Sᴇʟᴇᴄᴛ ʏᴏᴜʀ ᴘʟᴀɴ:**")
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("1 DAY · ₹9", callback_data="buy_1d"), InlineKeyboardButton("7 DAYS · ₹24", callback_data="buy_7d")],
         [InlineKeyboardButton("1 MONTH · ₹60", callback_data="buy_1m"), InlineKeyboardButton("3 MONTHS · ₹150", callback_data="buy_3m")],
@@ -731,6 +737,7 @@ async def batch_handler(client: Client, message: Message):
     caption_text = "⏳ **This video will expire in 5 minutes! Save it ASAP!**"
     for v in random.sample(all_vids, min(4, len(all_vids))):
         try:
+            # FIX: protect_content=True to disable forwarding for Batch
             sent = await client.copy_message(chat_id=user_id, from_chat_id=DB_CHANNEL, message_id=v["msg_id"], caption=caption_text, protect_content=True)
             asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
         except: pass
@@ -787,7 +794,8 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
             try: await query.message.delete()
             except: pass
             
-        sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption="⏳ **This video will expire in 5 minutes! Save it ASAP!**", reply_markup=kb, protect_content=not prem)
+        # FIX: protect_content=True for everyone, premium or non-premium
+        sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption="⏳ **This video will expire in 5 minutes! Save it ASAP!**", reply_markup=kb, protect_content=True)
         video_cooldowns[user_id] = time.time()
         asyncio.create_task(auto_delete_msg(sent, AUTO_DELETE_SECONDS))
     except PeerIdInvalid: await client.send_message(chat_id, "⚠️ Bot is blind to Database Channel. Send a text message inside DB.")
