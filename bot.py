@@ -50,7 +50,7 @@ def get_peer_type_new(peer_id: int) -> str:
         return "chat"
 
 utils.get_peer_type = get_peer_type_new
-# ============================================================================
+# icons
 
 # ==================== CONFIGURATION ====================
 API_ID = int(os.environ.get("API_ID", "27479878"))
@@ -405,12 +405,12 @@ async def find_cmd(client: Client, message: Message):
     # 2. Check Force Sub
     joined, btns = await check_fsub(client, user_id)
     if not joined:
-        return await message.reply("⚠️ **Please join all our channels first!**", reply_markup=InlineKeyboardMarkup(btns))
+        return await message.reply("⚠️ **Please join the remaining channels first!**", reply_markup=InlineKeyboardMarkup(btns))
 
     user = await get_user(user_id)
     prem = await is_premium(user_id)
 
-    # 3. Check Limits (Strict Free Limit Block)
+    # 3. Check Limits
     if not prem and user.get("daily_count", 0) >= FREE_DAILY_LIMIT:
         bot_me = await client.get_me()
         verify_short_url = await get_verify_link(client, user_id)
@@ -642,32 +642,48 @@ async def get_verify_link(client: Client, user_id: int) -> str:
     except Exception: pass
     return FALLBACK_SHORT_LINK
 
+# ==================== FIXED FORCE JOIN ====================
 async def check_fsub(client: Client, user_id: int):
-    if user_id == OWNER_ID: return True, []
-    is_missing = False
-    async with aiohttp.ClientSession() as session:
-        for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
-            is_member = False
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember?chat_id={ch_id}&user_id={user_id}"
+    if user_id == OWNER_ID:
+        return True, []
+
+    missing = []
+
+    for ch_id in FSUB_CHANNELS:
+        try:
+            member = await client.get_chat_member(ch_id, user_id)
+            status = str(member.status).lower()
+
+            if status not in ["member", "administrator", "creator", "owner"]:
+                missing.append(ch_id)
+
+        except UserNotParticipant:
+            missing.append(ch_id)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
             try:
-                async with session.get(url, timeout=5) as resp:
-                    data = await resp.json()
-                    if data.get("ok"):
-                        status = data["result"]["status"]
-                        if status in ["member", "administrator", "creator"]:
-                            is_member = True
-            except Exception: pass
-            if not is_member:
-                is_missing = True
-                break
-    if is_missing:
-        all_buttons = []
-        for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
+                member = await client.get_chat_member(ch_id, user_id)
+                status = str(member.status).lower()
+                if status not in ["member", "administrator", "creator", "owner"]:
+                    missing.append(ch_id)
+            except:
+                missing.append(ch_id)
+        except Exception as e:
+            logger.warning(f"FSUB Error | Channel: {ch_id} | User: {user_id} | Error: {e}")
+            missing.append(ch_id)
+
+    if not missing:
+        return True, []
+
+    # Only show remaining channels
+    buttons = []
+    for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
+        if ch_id in missing:
             link = FSUB_LINKS.get(ch_id, "https://t.me/telegram")
-            all_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
-        all_buttons.append([InlineKeyboardButton("🔄 TRY AGAIN", callback_data="check_fsub")])
-        return False, all_buttons
-    return True, []
+            buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
+
+    buttons.append([InlineKeyboardButton("✅ I've Joined - Try Again", callback_data="check_fsub")])
+    return False, buttons
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
@@ -675,16 +691,24 @@ async def start_cmd(client: Client, message: Message):
     existed = await users_col.find_one({"_id": user_id})
     user = await get_user(user_id)
 
+    # Verification
     if len(message.command) > 1 and message.command[1].startswith("verify_"):
         token = message.command[1].replace("verify_", "")
         if user.get("verify_token") == token or token == "free1day":
             await users_col.update_one({"_id": user_id}, {"$set": {"verify_token": None}})
             new_exp = await add_premium(user_id, 1)
-            try: await client.send_message(LOG_CHANNEL, f"🎁 #SHORTLINK_VERIFIED\n👤 **User:** {message.from_user.mention} (`{user_id}`)\n🎁 **Reward:** 1 Day Premium")
-            except: pass
-            return await message.reply("✅ **Verification Successful!**\n\n🎉 You received **1 DAY FREE PREMIUM**!\n" + f"📅 **Expires on:** `{new_exp.strftime('%d %b %Y, %I:%M %p')} UTC`", reply_markup=MAIN_KEYBOARD)
-        else: return await message.reply("⚠️ **Invalid or Expired Verification Link!**")
+            try:
+                await client.send_message(LOG_CHANNEL, f"🎁 #SHORTLINK_VERIFIED\n👤 {message.from_user.mention} (`{user_id}`)\n🎁 1 Day Premium")
+            except:
+                pass
+            return await message.reply(
+                f"✅ **Verification Successful!**\n\n🎉 You received **1 DAY FREE PREMIUM**!\n📅 Expires: `{new_exp.strftime('%d %b %Y, %I:%M %p')} UTC`",
+                reply_markup=MAIN_KEYBOARD
+            )
+        else:
+            return await message.reply("⚠️ Invalid or expired verification link!")
 
+    # Referral
     if not existed:
         if len(message.command) > 1 and message.command[1].startswith("ref_"):
             try:
@@ -693,30 +717,75 @@ async def start_cmd(client: Client, message: Message):
                     referrer = await get_user(ref_id)
                     new_pts = referrer.get("ref_points", 0) + 1
                     await users_col.update_one({"_id": user_id}, {"$set": {"referred_by": ref_id}})
+
                     if new_pts >= 5:
                         await users_col.update_one({"_id": ref_id}, {"$inc": {"referrals": 1}, "$set": {"ref_points": 0}})
                         new_exp = await add_premium(ref_id, 1)
-                        try: await client.send_message(ref_id, f"🎉 **5 Referral Points Completed!**\n💎 You unlocked **1 DAY FREE PREMIUM**!")
-                        except: pass
+                        try:
+                            await client.send_message(ref_id, "🎉 **5 Referral Points Completed!**\n💎 You unlocked **1 DAY FREE PREMIUM**!")
+                        except:
+                            pass
                     else:
                         await users_col.update_one({"_id": ref_id}, {"$inc": {"referrals": 1}, "$set": {"ref_points": new_pts}})
-                        try: await client.send_message(ref_id, f"👥 **New Referral Joined!** (+1 Point)\n🎯 **Points:** `{new_pts}/5`")
-                        except: pass
-            except: pass
-        try: await client.send_message(LOG_CHANNEL, f"👤 #NEW_USER\n👤 **User:** {message.from_user.mention}\n🆔 **ID:** `{user_id}`")
-        except: pass
+                        try:
+                            await client.send_message(ref_id, f"👥 New Referral! (+1 Point)\n🎯 Points: `{new_pts}/5`")
+                        except:
+                            pass
+            except:
+                pass
 
-    joined, btns = await check_fsub(client, user_id)
+        try:
+            await client.send_message(LOG_CHANNEL, f"👤 #NEW_USER\n👤 {message.from_user.mention}\n🆔 `{user_id}`")
+        except:
+            pass
+
+    # Force Join
+    joined, buttons = await check_fsub(client, user_id)
     if not joined:
-        return await message.reply("⚠️ **Please join all our updates channels below to use this bot!**", reply_markup=InlineKeyboardMarkup(btns))
-    await message.reply(f"👋 **Welcome {message.from_user.first_name}!**\n\nUse the buttons below to get videos or manage your plan.", reply_markup=MAIN_KEYBOARD)
+        return await message.reply(
+            "⚠️ **Please join the remaining channels below:**",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+    await message.reply(
+        f"👋 **Welcome {message.from_user.first_name}!**\n\nUse the buttons below to get videos.",
+        reply_markup=MAIN_KEYBOARD
+    )
 
 @app.on_callback_query(filters.regex("^check_fsub$"))
 async def fsub_callback(client: Client, query: CallbackQuery):
-    joined, btns = await check_fsub(client, query.from_user.id)
-    if not joined: return await query.answer("❌ You haven't joined all channels yet! Please check them one by one.", show_alert=True)
-    await query.message.delete()
-    await query.message.reply("✅ **Thank you for joining!** Use the menu below:", reply_markup=MAIN_KEYBOARD)
+    joined, buttons = await check_fsub(client, query.from_user.id)
+
+    if not joined:
+        await query.answer("❌ You still haven't joined all channels!", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
+        except:
+            pass
+        return
+
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    await query.message.reply(
+        "✅ **Thank you for joining!** You can now use the bot.",
+        reply_markup=MAIN_KEYBOARD
+    )
+
+# Debug command
+@app.on_message(filters.command("checkme") & filters.private)
+async def checkme(client: Client, message: Message):
+    uid = message.from_user.id
+    text = "**Your Membership Status:**\n\n"
+    for idx, ch in enumerate(FSUB_CHANNELS, start=1):
+        try:
+            m = await client.get_chat_member(ch, uid)
+            text += f"Channel {idx}: `{m.status}` ✅\n"
+        except Exception as e:
+            text += f"Channel {idx}: ❌ `{e}`\n"
+    await message.reply(text)
 
 async def send_plan_menu(message: Message, user_id: int, force_buy=False, is_cb=False):
     user = await get_user(user_id)
@@ -789,7 +858,7 @@ async def batch_handler(client: Client, message: Message):
     user_id = message.from_user.id
     joined, btns = await check_fsub(client, user_id)
     if not joined:
-        return await message.reply("⚠️ **Please join all our channels first!**", reply_markup=InlineKeyboardMarkup(btns))
+        return await message.reply("⚠️ **Please join the remaining channels first!**", reply_markup=InlineKeyboardMarkup(btns))
     prem = await is_premium(user_id)
     if not prem:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Buy Premium", callback_data="force_buy_menu")]])
@@ -829,7 +898,7 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
 
     joined, btns = await check_fsub(client, user_id)
     if not joined:
-        return await client.send_message(chat_id=chat_id, text="⚠️ **Please join all our updates channels first!**", reply_markup=InlineKeyboardMarkup(btns))
+        return await client.send_message(chat_id=chat_id, text="⚠️ **Please join the remaining channels first!**", reply_markup=InlineKeyboardMarkup(btns))
 
     user = await get_user(user_id)
     prem = await is_premium(user_id)
