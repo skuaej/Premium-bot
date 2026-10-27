@@ -1,3 +1,4 @@
+
 import asyncio
 import random
 import secrets
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import sys
 from aiohttp import web
 
-# --- FIX FOR ANDROID DNS (If testing locally) ---
+# --- FIX FOR ANDROID (PYDROID 3 & TERMUX) DNS ERROR ---
 import dns.resolver
 dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
 dns.resolver.default_resolver.nameservers = ["8.8.8.8", "8.8.4.4", "1.1.1.1"]
@@ -29,14 +30,14 @@ from pyrogram.types import (
 from pyrogram.errors import UserNotParticipant, FloodWait, PeerIdInvalid
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# ==================== CONFIGURATION ====================
-API_ID = 27479878
-API_HASH = "05f8dc8265d4c5df6376dded1d71c0ff"
-BOT_TOKEN = "8898529611:AAFG-W2NG8rOMVfwyTRLcCYGbizDf5nCfDU"
+# ==================== CONFIGURATION (CLOUD READY) ====================
+API_ID = int(os.environ.get("API_ID", "27479878"))
+API_HASH = os.environ.get("API_HASH", "05f8dc8265d4c5df6376dded1d71c0ff")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8898529611:AAFG-W2NG8rOMVfwyTRLcCYGbizDf5nCfDU")
 
-OWNER_ID = 6804892450
-LOG_CHANNEL = -1004351084760
-DB_CHANNEL = -1004310513644
+OWNER_ID = int(os.environ.get("OWNER_ID", "6804892450"))
+LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "-1004351084760"))
+DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-1004310513644"))
 
 FSUB_CHANNELS = [-1004418968985, -1004362209221, -1004350772381]
 FSUB_LINKS = {
@@ -45,10 +46,10 @@ FSUB_LINKS = {
     -1004350772381: "https://t.me/+auUb96ZUfh0yZDI1"
 }
 
-MONGO_URL = "mongodb+srv://usaomega1_db_user:Masdt2qYlJfXs20N@cluster0.zpedlcp.mongodb.net/?appName=Cluster0"
-DB_NAME = "Cluster0"
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb+srv://usaomega1_db_user:Masdt2qYlJfXs20N@cluster0.zpedlcp.mongodb.net/?appName=Cluster0")
+DB_NAME = os.environ.get("DB_NAME", "Cluster0")
 
-SHORTENER_API = "f97c6e815c1d7bcaeca0660b5ae0064f5b6c2973"  
+SHORTENER_API = os.environ.get("SHORTENER_API", "f97c6e815c1d7bcaeca0660b5ae0064f5b6c2973")  
 SHORTENER_DOMAIN = "vplink.in"
 FALLBACK_SHORT_LINK = "https://vplink.in/WOODZ2"
 
@@ -107,10 +108,12 @@ def check_spam(user_id: int):
         else:
             del spam_blocked_until[user_id]
             spam_notified.discard(user_id)
+
     hits = user_activity.get(user_id, [])
     hits = [t for t in hits if now - t <= SPAM_WINDOW_SEC]
     hits.append(now)
     user_activity[user_id] = hits
+
     if len(hits) > SPAM_MAX_HITS:
         spam_blocked_until[user_id] = now + SPAM_BLOCK_DURATION
         user_activity[user_id] = []
@@ -122,12 +125,16 @@ async def anti_spam_message_gate(client: Client, message: Message):
     if not message.from_user: return
     uid = message.from_user.id
     if uid == OWNER_ID: return
+
     blocked, rem, newly_blocked = check_spam(uid)
     if blocked:
         mins, secs = divmod(rem, 60)
         if newly_blocked or uid not in spam_notified:
             spam_notified.add(uid)
-            await message.reply(f"🚫 {message.from_user.mention}, **SPAM DETECTED!**\n\nYou are sending requests too fast. You have been blocked for `{mins}m {secs}s`.")
+            await message.reply(
+                f"🚫 {message.from_user.mention}, **SPAM DETECTED!**\n\n"
+                f"You are sending requests too fast. You have been blocked for `{mins}m {secs}s`."
+            )
         raise StopPropagation
 
 @app.on_callback_query(group=-1)
@@ -135,6 +142,7 @@ async def anti_spam_callback_gate(client: Client, query: CallbackQuery):
     if not query.from_user: return
     uid = query.from_user.id
     if uid == OWNER_ID: return
+
     blocked, rem, newly_blocked = check_spam(uid)
     if blocked:
         mins, secs = divmod(rem, 60)
@@ -149,7 +157,8 @@ async def get_user(user_id: int):
         user = {
             "_id": user_id, "referrals": 0, "ref_points": 0, "referred_by": None,
             "premium_expiry": None, "daily_count": 0, "last_reset": today_str,
-            "verify_token": None, "joined_at": datetime.now(timezone.utc), "video_index": 0
+            "verify_token": None, "joined_at": datetime.now(timezone.utc),
+            "video_index": 0
         }
         await users_col.insert_one(user)
     else:
@@ -280,6 +289,7 @@ async def unblock_cmd(client: Client, message: Message):
     spam_notified.discard(uid)
     await message.reply(f"✅ User `{uid}` unblocked from spam cooldown!")
 
+# ==================== ADVANCED INDEX DB CHANNEL VIDEOS ====================
 @app.on_message(filters.command("index") & filters.user(OWNER_ID))
 async def manual_index(client: Client, message: Message):
     if len(message.command) == 2:
@@ -324,7 +334,7 @@ async def start_cmd(client: Client, message: Message):
         token = message.command[1].replace("verify_", "")
         if user.get("verify_token") == token or token == "free1day":
             await users_col.update_one({"_id": user_id}, {"$set": {"verify_token": None}})
-            new_exp = await add_premium(user_id, 1) # Changed back to 1 Day
+            new_exp = await add_premium(user_id, 1)
             try: await client.send_message(LOG_CHANNEL, f"🎁 #SHORTLINK_VERIFIED\n\n👤 **User:** {message.from_user.mention} (`{user_id}`)\n🎁 **Reward:** 1 Day Premium Free")
             except Exception: pass
             return await message.reply("✅ **Verification Successful!**\n\n🎉 You received **1 DAY FREE PREMIUM**!\n" + f"📅 **Expires on:** `{new_exp.strftime('%d %b %Y, %I:%M %p')} UTC`", reply_markup=MAIN_KEYBOARD)
@@ -362,7 +372,7 @@ async def fsub_callback(client: Client, query: CallbackQuery):
     await query.message.delete()
     await query.message.reply("✅ **Thank you for joining!** Use the menu below:", reply_markup=MAIN_KEYBOARD)
 
-# ==================== PLAN STATUS ====================
+# ==================== PLAN STATUS / BUY PREMIUM ====================
 async def send_plan_menu(message: Message, user_id: int):
     user = await get_user(user_id)
     daily_count = user.get("daily_count", 0)
@@ -411,7 +421,7 @@ async def send_refer_stats(client: Client, user_id: int, message: Message):
 @app.on_message(filters.regex("^REFER 👥$") & filters.private)
 async def refer_handler(client: Client, message: Message): await send_refer_stats(client, message.from_user.id, message)
 
-# ==================== BATCH COMMAND (SHOWS 3 METHODS) ====================
+# ==================== BATCH COMMAND ====================
 @app.on_message(filters.regex("^BATCH 💋$") & filters.private)
 async def batch_handler(client: Client, message: Message):
     user_id = message.from_user.id
@@ -460,10 +470,13 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, edit_msg: 
     if not all_vids: return await client.send_message(chat_id, "⚠️ **No videos found in DB!** Run `/index 1 100`.")
 
     current_idx = user.get("video_index", 0)
+    
     if direction == "prev":
         current_idx -= 2  
         if current_idx < 0: current_idx = len(all_vids) - 1
-    if current_idx >= len(all_vids): current_idx = 0 
+        
+    if current_idx >= len(all_vids): 
+        current_idx = 0 
         
     chosen = all_vids[current_idx]
     await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}, "$set": {"video_index": current_idx + 1}})
@@ -494,7 +507,7 @@ async def nav_video_cb(client: Client, query: CallbackQuery):
     await query.answer()
     await send_video_item(client, query.from_user.id, query.message.chat.id, edit_msg=query.message, direction=direction)
 
-# ==================== MANUAL SCREENSHOT + UTR SYSTEM ====================
+# ==================== MANUAL SCREENSHOT + UTR PAYMENT SYSTEM ====================
 @app.on_callback_query(filters.regex("^buy_(.+)$"))
 async def create_order_cb(client: Client, query: CallbackQuery):
     plan_key = query.data.split("_")[1]
@@ -515,6 +528,7 @@ async def create_order_cb(client: Client, query: CallbackQuery):
 async def verify_payment_cb(client: Client, query: CallbackQuery):
     order_id = query.data.replace("verify_pay_", "")
     user_id = query.from_user.id
+    
     pending_proofs[user_id] = order_id
     pending_utr.pop(user_id, None) 
     
@@ -595,7 +609,7 @@ async def admin_reject_cb(client: Client, query: CallbackQuery):
         await client.send_message(order["user_id"], f"❌ **Payment Rejected!**\n\nYour payment for Order `{order_id}` could not be verified. If this is a mistake, contact support below.", reply_markup=kb)
     except Exception: pass
 
-# ==================== DUMMY WEB SERVER FOR CLOUD DEPLOY (KOYEB) ====================
+# ==================== DUMMY WEB SERVER FOR CLOUD DEPLOY (KOYEB/RENDER) ====================
 async def web_handler(request):
     return web.Response(text="Bot is running smoothly 24/7!")
 
@@ -604,7 +618,7 @@ async def start_web_server():
     webapp.router.add_get("/", web_handler)
     runner = web.AppRunner(webapp)
     await runner.setup()
-    port = int(os.environ.get("PORT", 8080)) # Koyeb uses $PORT
+    port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"✅ Web server listening on port {port}")
@@ -628,4 +642,3 @@ async def main():
 
 if __name__ == "__main__":
     loop.run_until_complete(main())
-EOF
