@@ -405,7 +405,11 @@ async def find_cmd(client: Client, message: Message):
     # 2. Check Force Sub
     joined, btns = await check_fsub(client, user_id)
     if not joined:
-        return await message.reply("⚠️ **Please join all our channels first!**", reply_markup=InlineKeyboardMarkup(btns))
+        return await message.reply(
+            "⚠️ **Please join all our updates channels first!**\n\n"
+            "👉 *Please check if you have joined these channels one by one, then click TRY AGAIN.*", 
+            reply_markup=InlineKeyboardMarkup(btns)
+        )
 
     user = await get_user(user_id)
     prem = await is_premium(user_id)
@@ -628,7 +632,7 @@ async def manual_index(client: Client, message: Message):
     idx_state["is_active"] = False
     await message.reply(f"✅ **Indexing Complete!**\n\n🆕 **New Videos Added:** `{idx_state['added']}`\n⏭️ **Duplicates Skipped:** `{idx_state['skipped']}`")
 
-# ==================== DYNAMIC HYBRID FORCE SUB ====================
+# ==================== SHOW ALL FORCE SUB CHANNELS ====================
 async def get_verify_link(client: Client, user_id: int) -> str:
     token = secrets.token_urlsafe(8)
     await users_col.update_one({"_id": user_id}, {"$set": {"verify_token": token}})
@@ -647,38 +651,34 @@ async def get_verify_link(client: Client, user_id: int) -> str:
 async def check_fsub(client: Client, user_id: int):
     if user_id == OWNER_ID: return True, []
     
-    missing_channels = []
+    missing = False
     
-    for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
+    for ch_id in FSUB_CHANNELS:
         try:
-            # 1. First try Pyrogram's direct API (Fastest)
             member = await client.get_chat_member(chat_id=ch_id, user_id=user_id)
             if member.status not in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-                missing_channels.append((idx, ch_id))
-                
-        except Exception as e:
-            # 2. If Pyrogram fails (PeerIdInvalid or cache reset), fallback to pure HTTP Request
+                missing = True
+                break
+        except Exception:
             try:
                 async with aiohttp.ClientSession() as session:
                     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember?chat_id={ch_id}&user_id={user_id}"
                     async with session.get(url, timeout=5) as resp:
                         data = await resp.json()
-                        if data.get("ok"):
-                            status = data["result"]["status"]
-                            if status not in ["member", "administrator", "creator"]:
-                                missing_channels.append((idx, ch_id))
-                        else:
-                            missing_channels.append((idx, ch_id))
+                        if not data.get("ok") or data["result"]["status"] not in ["member", "administrator", "creator"]:
+                            missing = True
+                            break
             except Exception:
-                missing_channels.append((idx, ch_id))
+                missing = True
+                break
                 
-    if missing_channels:
-        missing_buttons = []
-        for idx, ch_id in missing_channels:
+    if missing:
+        all_buttons = []
+        for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
             link = FSUB_LINKS.get(ch_id, "https://t.me/telegram")
-            missing_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
-        missing_buttons.append([InlineKeyboardButton("🔄 TRY AGAIN", callback_data="check_fsub")])
-        return False, missing_buttons
+            all_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
+        all_buttons.append([InlineKeyboardButton("🔄 TRY AGAIN", callback_data="check_fsub")])
+        return False, all_buttons
         
     return True, []
 
@@ -686,11 +686,7 @@ async def check_fsub(client: Client, user_id: int):
 async def fsub_callback(client: Client, query: CallbackQuery):
     joined, btns = await check_fsub(client, query.from_user.id)
     if not joined: 
-        try:
-            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btns))
-            await query.answer("❌ You haven't joined all channels! Please join the remaining ones.", show_alert=True)
-        except Exception:
-            await query.answer("❌ Please check if you joined the remaining channels!", show_alert=True)
+        await query.answer("❌ You still haven't joined all channels! Please check each channel.", show_alert=True)
         return
         
     try:
@@ -853,7 +849,12 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
 
     joined, btns = await check_fsub(client, user_id)
     if not joined:
-        return await client.send_message(chat_id=chat_id, text="⚠️ **Please join all our updates channels first!**", reply_markup=InlineKeyboardMarkup(btns))
+        return await client.send_message(
+            chat_id=chat_id, 
+            text="⚠️ **Please join all our updates channels first!**\n\n"
+                 "👉 *Please check if you have joined these channels one by one, then click TRY AGAIN.*", 
+            reply_markup=InlineKeyboardMarkup(btns)
+        )
 
     user = await get_user(user_id)
     prem = await is_premium(user_id)
