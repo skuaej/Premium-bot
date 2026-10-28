@@ -405,11 +405,7 @@ async def find_cmd(client: Client, message: Message):
     # 2. Check Force Sub
     joined, btns = await check_fsub(client, user_id)
     if not joined:
-        return await message.reply(
-            "⚠️ **Please join all our updates channels first!**\n\n"
-            "👉 *Please check if you have joined these channels one by one, then click TRY AGAIN.*", 
-            reply_markup=InlineKeyboardMarkup(btns)
-        )
+        return await message.reply("⚠️ **Please join all our channels first!**", reply_markup=InlineKeyboardMarkup(btns))
 
     user = await get_user(user_id)
     prem = await is_premium(user_id)
@@ -431,19 +427,22 @@ async def find_cmd(client: Client, message: Message):
     # 4. Fetch from DB
     vid = await videos_col.find_one({"msg_id": msg_id})
     if not vid: return await message.reply("❌ Video not found in the database.")
-    
-    # 5. Update State
-    if not prem and not is_adm:
-        await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}})
-    video_cooldowns[user_id] = time.time()
 
-    # 6. Send and set for Auto-Delete
+    # 5. Send and set for Auto-Delete
     try:
         caption_text = f"🍿 **Video ID:** `{msg_id}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
         sent = await client.copy_message(chat_id=message.chat.id, from_chat_id=DB_CHANNEL, message_id=msg_id, caption=caption_text, protect_content=True)
+        
+        # 6. Update State ONLY on success
+        if not prem and not is_adm:
+            await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}})
+        video_cooldowns[user_id] = time.time()
+        
         asyncio.create_task(auto_delete_msg(client, message.chat.id, sent.id, AUTO_DELETE_SECONDS))
     except Exception as e:
-        await message.reply(f"⚠️ Error sending video: {e}")
+        # CORRUPTED VIDEO AUTO-DELETE
+        await videos_col.delete_one({"msg_id": msg_id})
+        await message.reply("⚠️ **This video is corrupted or was deleted from the server.** It has been automatically removed from the database.")
 
 @app.on_message(filters.command(["del", "delete"]))
 async def delete_cmd(client: Client, message: Message):
@@ -632,7 +631,7 @@ async def manual_index(client: Client, message: Message):
     idx_state["is_active"] = False
     await message.reply(f"✅ **Indexing Complete!**\n\n🆕 **New Videos Added:** `{idx_state['added']}`\n⏭️ **Duplicates Skipped:** `{idx_state['skipped']}`")
 
-# ==================== SHOW ALL FORCE SUB CHANNELS ====================
+# ==================== DYNAMIC HYBRID FORCE SUB ====================
 async def get_verify_link(client: Client, user_id: int) -> str:
     token = secrets.token_urlsafe(8)
     await users_col.update_one({"_id": user_id}, {"$set": {"verify_token": token}})
@@ -651,34 +650,38 @@ async def get_verify_link(client: Client, user_id: int) -> str:
 async def check_fsub(client: Client, user_id: int):
     if user_id == OWNER_ID: return True, []
     
-    missing = False
+    missing_channels = []
     
-    for ch_id in FSUB_CHANNELS:
+    for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
         try:
+            # 1. First try Pyrogram's direct API (Fastest)
             member = await client.get_chat_member(chat_id=ch_id, user_id=user_id)
             if member.status not in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-                missing = True
-                break
-        except Exception:
+                missing_channels.append((idx, ch_id))
+                
+        except Exception as e:
+            # 2. If Pyrogram fails (PeerIdInvalid or cache reset), fallback to pure HTTP Request
             try:
                 async with aiohttp.ClientSession() as session:
                     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember?chat_id={ch_id}&user_id={user_id}"
                     async with session.get(url, timeout=5) as resp:
                         data = await resp.json()
-                        if not data.get("ok") or data["result"]["status"] not in ["member", "administrator", "creator"]:
-                            missing = True
-                            break
+                        if data.get("ok"):
+                            status = data["result"]["status"]
+                            if status not in ["member", "administrator", "creator"]:
+                                missing_channels.append((idx, ch_id))
+                        else:
+                            missing_channels.append((idx, ch_id))
             except Exception:
-                missing = True
-                break
+                missing_channels.append((idx, ch_id))
                 
-    if missing:
-        all_buttons = []
-        for idx, ch_id in enumerate(FSUB_CHANNELS, start=1):
+    if missing_channels:
+        missing_buttons = []
+        for idx, ch_id in missing_channels:
             link = FSUB_LINKS.get(ch_id, "https://t.me/telegram")
-            all_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
-        all_buttons.append([InlineKeyboardButton("🔄 TRY AGAIN", callback_data="check_fsub")])
-        return False, all_buttons
+            missing_buttons.append([InlineKeyboardButton(f"📢 JOIN CHANNEL {idx}", url=link)])
+        missing_buttons.append([InlineKeyboardButton("🔄 TRY AGAIN", callback_data="check_fsub")])
+        return False, missing_buttons
         
     return True, []
 
@@ -686,7 +689,11 @@ async def check_fsub(client: Client, user_id: int):
 async def fsub_callback(client: Client, query: CallbackQuery):
     joined, btns = await check_fsub(client, query.from_user.id)
     if not joined: 
-        await query.answer("❌ You still haven't joined all channels! Please check each channel.", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btns))
+            await query.answer("❌ You haven't joined all channels! Please join the remaining ones.", show_alert=True)
+        except Exception:
+            await query.answer("❌ Please check if you joined the remaining channels!", show_alert=True)
         return
         
     try:
@@ -833,7 +840,9 @@ async def batch_handler(client: Client, message: Message):
             caption_text = f"🍿 **Video ID:** `{v['msg_id']}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
             sent = await client.copy_message(chat_id=user_id, from_chat_id=DB_CHANNEL, message_id=v["msg_id"], caption=caption_text, protect_content=True)
             asyncio.create_task(auto_delete_msg(client, user_id, sent.id, AUTO_DELETE_SECONDS))
-        except: pass
+        except Exception:
+            # AUTO-SKIP CORRUPTED VIDEOS
+            await videos_col.delete_one({"msg_id": v["msg_id"]})
 
 async def send_video_item(client: Client, user_id: int, chat_id: int, query: CallbackQuery = None, direction="next"):
     now = time.time()
@@ -874,30 +883,45 @@ async def send_video_item(client: Client, user_id: int, chat_id: int, query: Cal
     if not all_vids: return await client.send_message(chat_id, "⚠️ **No videos found!**")
 
     current_idx = user.get("video_index", 0)
-    if direction == "prev":
-        current_idx -= 2  
-        if current_idx < 0: current_idx = len(all_vids) - 1
-    if current_idx >= len(all_vids): current_idx = 0 
-        
-    chosen = all_vids[current_idx]
-    await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}, "$set": {"video_index": current_idx + 1}})
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏮ PREVIOUS", callback_data="nav_video_prev"), InlineKeyboardButton("▶ NEXT", callback_data="nav_video_next")],
-        [InlineKeyboardButton("🔞 VIRAL VIDEOS STUFF 👑", url=PROMO_CHANNEL_URL)]
-    ])
-
-    try:
-        if query and query.message:
-            try: await query.message.delete()
-            except: pass
+    
+    while True:
+        if not all_vids:
+            return await client.send_message(chat_id, "⚠️ **No valid videos remaining in the database.**")
             
-        caption_text = f"🍿 **Video ID:** `{chosen['msg_id']}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
-        sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption=caption_text, reply_markup=kb, protect_content=True)
-        video_cooldowns[user_id] = time.time()
-        asyncio.create_task(auto_delete_msg(client, chat_id, sent.id, AUTO_DELETE_SECONDS))
-    except PeerIdInvalid: await client.send_message(chat_id, "⚠️ Bot is blind to Database Channel. Send a text message inside DB.")
-    except Exception as e: await client.send_message(chat_id, f"⚠️ Error fetching video: `{e}`")
+        if direction == "prev":
+            current_idx -= 2  
+            if current_idx < 0: current_idx = len(all_vids) - 1
+            
+        if current_idx >= len(all_vids) or current_idx < 0: 
+            current_idx = 0 
+            
+        chosen = all_vids[current_idx]
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏮ PREVIOUS", callback_data="nav_video_prev"), InlineKeyboardButton("▶ NEXT", callback_data="nav_video_next")],
+            [InlineKeyboardButton("🔞 VIRAL VIDEOS STUFF 👑", url=PROMO_CHANNEL_URL)]
+        ])
+
+        try:
+            caption_text = f"🍿 **Video ID:** `{chosen['msg_id']}`\n⏳ **This video will expire in 5 minutes! Save it ASAP!**"
+            sent = await client.copy_message(chat_id=chat_id, from_chat_id=DB_CHANNEL, message_id=chosen["msg_id"], caption=caption_text, reply_markup=kb, protect_content=True)
+            
+            if query and query.message:
+                try: await query.message.delete()
+                except: pass
+                
+            await users_col.update_one({"_id": user_id}, {"$inc": {"daily_count": 1}, "$set": {"video_index": current_idx + 1}})
+            video_cooldowns[user_id] = time.time()
+            asyncio.create_task(auto_delete_msg(client, chat_id, sent.id, AUTO_DELETE_SECONDS))
+            return 
+            
+        except PeerIdInvalid: 
+            return await client.send_message(chat_id, "⚠️ Bot is blind to Database Channel. Send a text message inside DB.")
+        except Exception:
+            # AUTO-SKIP CORRUPTED VIDEOS
+            await videos_col.delete_one({"msg_id": chosen["msg_id"]})
+            all_vids.pop(current_idx)
+            direction = "next" 
 
 @app.on_message(filters.regex("^GET VIDEO 🍭$") & filters.private)
 async def get_video_handler(client: Client, message: Message): await send_video_item(client, message.from_user.id, message.chat.id, direction="next")
